@@ -200,23 +200,44 @@ def get_news(topic: str, count: int) -> list:
     ]
 
 
+COMMON_SPANISH = {
+    "el","la","los","las","de","del","en","con","por","para","que","una","uno",
+    "su","sus","es","son","fue","ha","han","se","al","más","pero","como","este",
+    "esta","estos","estas","está","están","tiene","tienen","según","también",
+    "sobre","entre","cuando","donde","cómo","qué","quién","nuevo","nueva",
+    "nuevos","ciudad","policía","mujer","hombre","años","caso","tras"
+}
+
+def _is_english(text: str) -> bool:
+    """Return True if text appears to be English, False if likely Spanish."""
+    words = text.lower().split()
+    if not words:
+        return True
+    spanish_hits = sum(1 for w in words if w.strip(".,!?;:\"'") in COMMON_SPANISH)
+    return (spanish_hits / len(words)) < 0.15  # >15% Spanish words → reject
+
+
 def get_ep_news() -> list:
     """
     El Paso local news via RSS from KVIA, KFOX14, KTSM, El Paso Inc.
+    Filters out Spanish-language stories.
     Falls back to Claude search if all feeds fail.
     """
     all_items = []
     for source, feed_url in EP_NEWS_RSS:
-        items = _fetch_rss(feed_url, max_items=4)
+        items = _fetch_rss(feed_url, max_items=6)
         for item in items:
             item["source"] = source
         all_items.extend(items)
 
-    # Deduplicate by headline similarity (simple: exact match on first 40 chars)
+    # Filter Spanish, deduplicate
     seen = set()
     unique = []
     for item in all_items:
-        key = item.get("headline", "")[:40].lower()
+        headline = item.get("headline", "")
+        if not _is_english(headline):
+            continue
+        key = headline[:40].lower()
         if key not in seen:
             seen.add(key)
             unique.append(item)
@@ -224,7 +245,6 @@ def get_ep_news() -> list:
     if unique:
         return unique[:5]
 
-    # Fallback
     print("    ⚠️  EP RSS feeds empty, falling back to Claude search")
     return get_news("El Paso Texas Fort Bliss local news", 4)
 
@@ -342,14 +362,59 @@ def get_lsu_sports() -> dict:
     }
 
 
+LA_NEWS_RSS = [
+    ("WWL-TV",       "https://www.wwltv.com/feeds/syndication/rss/news"),
+    ("WDSU",         "https://www.wdsu.com/rss"),
+    ("The Advocate", "https://www.theadvocate.com/search/?f=rss&t=article&l=50&s=start_time&sd=desc"),
+    ("WAFB",         "https://www.wafb.com/rss/headlines"),
+    ("WVUE Fox 8",   "https://www.fox8live.com/rss/headlines"),
+]
+
+LA_AREA_MAP = {
+    "new orleans": "New Orleans", "metairie": "New Orleans", "kenner": "New Orleans",
+    "baton rouge": "Baton Rouge", "denham springs": "Baton Rouge",
+    "slidell": "Northshore",  "covington": "Northshore", "mandeville": "Northshore",
+    "hammond": "Northshore",  "talisheek": "Northshore", "bogalusa": "Northshore",
+    "st. tammany": "Northshore", "tangipahoa": "Northshore",
+}
+
+def _guess_la_area(text: str) -> str:
+    t = text.lower()
+    for keyword, area in LA_AREA_MAP.items():
+        if keyword in t:
+            return area
+    return "Statewide"
+
+
 def get_louisiana_news() -> list:
+    """Louisiana news via RSS from WWL-TV, WDSU, The Advocate, WAFB, WVUE."""
+    all_items = []
+    for source, feed_url in LA_NEWS_RSS:
+        items = _fetch_rss(feed_url, max_items=4)
+        for item in items:
+            item["source"] = source
+            item["area"]   = _guess_la_area(
+                item.get("headline","") + " " + item.get("summary","")
+            )
+        all_items.extend(items)
+
+    seen = set()
+    unique = []
+    for item in all_items:
+        key = item.get("headline","")[:40].lower()
+        if key not in seen and _is_english(item.get("headline","")):
+            seen.add(key)
+            unique.append(item)
+
+    if unique:
+        return unique[:5]
+
+    # Fallback
+    print("    ⚠️  Louisiana RSS empty, falling back to Claude")
     text = _claude(
-        f"Search for the 4 most important and recent news stories from Louisiana — "
-        f"focus on New Orleans, Baton Rouge, and the Northshore / St. Tammany Parish area. "
-        f"Cover local politics, crime, weather events, coastal issues, business, culture, or sports. "
-        f"Return ONLY a valid JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
-        f"'area' (e.g. 'New Orleans', 'Baton Rouge', 'Northshore', 'Statewide'). "
-        f"No markdown, no preamble. Pure JSON."
+        "Search for 4 recent Louisiana news stories — New Orleans, Baton Rouge, Northshore. "
+        "Return ONLY a JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
+        "'area' (New Orleans/Baton Rouge/Northshore/Statewide). No markdown. Pure JSON."
     )
     r = _parse_json(text)
     return r if isinstance(r, list) and r else [
@@ -403,15 +468,48 @@ def get_word_of_the_day() -> dict:
 
 
 def get_on_this_day() -> dict:
+    """
+    Fetch a real historical event from Wikipedia's free On This Day API.
+    Falls back to Claude if Wikipedia is unavailable.
+    """
+    today = date.today()
+    month, day = today.month, today.day
+    # Prefer military/science/exploration events
+    prefer_keywords = [
+        "war","battle","military","army","navy","air force","space","moon",
+        "expedition","invention","discovery","treaty","constitution","revolution",
+        "launched","founded","assassinated","declared","surrender","signed"
+    ]
+    try:
+        url  = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/events/{month}/{day}"
+        resp = requests.get(url, headers={"User-Agent":"DailyDigest/3.0"}, timeout=10)
+        data = resp.json()
+        events = data.get("events", [])
+        # Score events by keyword relevance
+        def score(e):
+            text = (e.get("text","") + " ".join(
+                p.get("title","") for p in e.get("pages",[])
+            )).lower()
+            return sum(1 for kw in prefer_keywords if kw in text)
+        events_sorted = sorted(events, key=score, reverse=True)
+        if events_sorted:
+            e = events_sorted[0]
+            return {
+                "year":     str(e.get("year","")),
+                "headline": e.get("text","")[:120],
+                "story":    e.get("text",""),
+            }
+    except Exception as ex:
+        print(f"    ⚠️  Wikipedia On This Day failed: {ex}")
+
+    # Fallback to Claude
     today_str = date.today().strftime("%B %d")
     text = _claude(
         f"What is one notable historical event that occurred on {today_str}? "
-        f"Prefer events related to military history, science, philosophy, exploration, or American history. "
-        f"Return ONLY a valid JSON object with three string fields: "
-        f"'year', 'headline' (one line), 'story' (2-3 sentences of context and significance). "
-        f"No markdown, no preamble. Pure JSON.",
-        use_search=False,
-        max_tokens=400,
+        f"Prefer military history, science, philosophy, or American history. "
+        f"Return ONLY a JSON object: 'year', 'headline' (one line), 'story' (2-3 sentences). "
+        f"No markdown. Pure JSON.",
+        use_search=False, max_tokens=400,
     )
     r = _parse_json(text)
     return r if isinstance(r, dict) and r.get("year") else {
@@ -442,34 +540,60 @@ def get_louisiana_festivals() -> list:
 
 
 def get_el_paso_weekend() -> list:
-    """Fetch El Paso / Fort Bliss area things to do this coming weekend."""
+    """Fetch El Paso things to do this weekend via Claude search."""
     from datetime import timedelta
-    today     = date.today()
-    today_str = today.strftime("%B %d, %Y")
-    days_to_fri = (4 - today.weekday()) % 7
-    if days_to_fri == 0:
-        days_to_fri = 7
+    today       = date.today()
+    today_str   = today.strftime("%B %d, %Y")
+    days_to_fri = (4 - today.weekday()) % 7 or 7
     fri = (today + timedelta(days=days_to_fri)).strftime("%B %d")
     sun = (today + timedelta(days=days_to_fri + 2)).strftime("%B %d")
     weekend_str = f"{fri}–{sun}"
 
     text = _claude(
-        f"Today is {today_str}. Search for things to do in El Paso Texas and the surrounding area "
-        f"this weekend ({weekend_str}). Include: concerts, festivals, markets, sporting events, "
-        f"outdoor activities, art shows, food events, family activities, Fort Bliss community events, "
-        f"and anything happening in Juárez that draws El Paso visitors. "
-        f"Return ONLY a valid JSON array of 6-8 events or activities. "
-        f"Each element must have exactly five string fields: "
-        f"'name' (event or activity name), 'venue' (location or neighborhood), "
-        f"'when' (day and time, e.g. 'Saturday 7:00 PM' or 'Saturday–Sunday'), "
-        f"'description' (1-2 sentences), "
-        f"'url' (event or venue website if available, otherwise empty string). "
-        f"Sort by date/time. No markdown, no preamble. Pure JSON."
+        f"Today is {today_str}. Search for things to do in El Paso Texas this weekend "
+        f"({weekend_str}). Search ElPasoTX.gov events calendar, eventbrite El Paso, "
+        f"Visit El Paso, and local venue websites. Include concerts, festivals, markets, "
+        f"sports, outdoor activities, art shows, food events, Fort Bliss MWR events. "
+        f"Return ONLY a JSON array of 5-7 items. Each element: "
+        f"'name', 'venue', 'when' (e.g. 'Sat 7 PM'), 'description' (1-2 sentences), "
+        f"'url' (website if available, else empty string). "
+        f"Sort by date/time. No markdown. Pure JSON.",
+        max_tokens=1000,
     )
     r = _parse_json(text)
     return r if isinstance(r, list) and r else [
-        {"name": "Weekend listings unavailable", "venue": "", "when": "",
-         "description": "Could not retrieve El Paso weekend events.", "url": ""}
+        {"name": "Check El Paso events", "venue": "Various",
+         "when": "This weekend",
+         "description": "Visit visitelpasoTexas.com or eventbrite.com for current listings.",
+         "url": "https://www.visitelpasotexas.com/events/"}
+    ]
+
+
+def get_ep_restaurants() -> list:
+    """
+    El Paso restaurant and bar news — new openings, closings, reviews.
+    Uses Claude search targeting local food blogs and news sites.
+    """
+    today_str = date.today().strftime("%B %d, %Y")
+    text = _claude(
+        f"Today is {today_str}. Search for recent El Paso Texas restaurant and bar news "
+        f"from the last 30 days. Look for: new restaurant openings, bar openings, "
+        f"restaurant closings, notable menu changes, new chef announcements, food truck news, "
+        f"and dining reviews. Search El Paso Inc, KVIA, KFOX14, Yelp El Paso, "
+        f"and local food blogs. "
+        f"Return ONLY a JSON array of 4-5 items. Each element: "
+        f"'name' (restaurant or bar name), "
+        f"'status' (e.g. 'New Opening', 'Closed', 'New Menu', 'Review', 'Food Truck'), "
+        f"'location' (neighborhood or street), "
+        f"'description' (1-2 sentences — what it is, what's notable), "
+        f"'url' (link if available, else empty string). "
+        f"No markdown. Pure JSON.",
+        max_tokens=900,
+    )
+    r = _parse_json(text)
+    return r if isinstance(r, list) and r else [
+        {"name": "Restaurant news unavailable", "status": "",
+         "location": "", "description": "Could not retrieve local dining news.", "url": ""}
     ]
 
 
@@ -639,12 +763,71 @@ def get_crs_links() -> list:
     return results
 
 
+WORLD_NEWS_RSS = [
+    ("BBC World",  "http://feeds.bbci.co.uk/news/world/rss.xml"),
+    ("Reuters",    "https://feeds.reuters.com/reuters/worldNews"),
+    ("AP News",    "https://rsshub.app/apnews/topics/world-news"),
+    ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+]
+
+WORLD_REGION_MAP = {
+    "ukraine":"Europe","russia":"Europe","germany":"Europe","france":"Europe",
+    "britain":"Europe","uk ":"Europe","european":"Europe","nato":"Europe",
+    "poland":"Europe","spain":"Europe","italy":"Europe","greece":"Europe",
+    "israel":"Middle East","gaza":"Middle East","iran":"Middle East",
+    "saudi":"Middle East","iraq":"Middle East","syria":"Middle East",
+    "lebanon":"Middle East","palestine":"Middle East","yemen":"Middle East",
+    "china":"Asia","japan":"Asia","korea":"Asia","taiwan":"Asia",
+    "india":"Asia","pakistan":"Asia","afghanistan":"Asia","vietnam":"Asia",
+    "africa":"Africa","nigeria":"Africa","kenya":"Africa","ethiopia":"Africa",
+    "egypt":"Africa","south africa":"Africa",
+    "canada":"Americas","mexico":"Americas","brazil":"Americas",
+    "venezuela":"Americas","colombia":"Americas","argentina":"Americas",
+}
+
+def _guess_region(text: str) -> str:
+    t = text.lower()
+    for keyword, region in WORLD_REGION_MAP.items():
+        if keyword in t:
+            return region
+    return "Global"
+
+
 def get_world_news() -> list:
+    """World news via RSS from BBC, Reuters, AP, Al Jazeera."""
+    # Filter out US-only stories
+    us_only = ["congress","senate","trump","biden","harris","white house",
+               "u.s. army","fort bliss","el paso","texas legislature"]
+    all_items = []
+    for source, feed_url in WORLD_NEWS_RSS:
+        items = _fetch_rss(feed_url, max_items=5)
+        for item in items:
+            hl = item.get("headline","").lower()
+            if any(kw in hl for kw in us_only):
+                continue
+            item["source"] = source
+            item["region"] = _guess_region(
+                item.get("headline","") + " " + item.get("summary","")
+            )
+        all_items.extend(items)
+
+    seen = set()
+    unique = []
+    for item in all_items:
+        key = item.get("headline","")[:40].lower()
+        if key not in seen and _is_english(item.get("headline","")):
+            seen.add(key)
+            unique.append(item)
+
+    if unique:
+        return unique[:5]
+
+    # Fallback
+    print("    ⚠️  World news RSS empty, falling back to Claude")
     text = _claude(
-        f"Search for the 4 most important international news stories (excluding the U.S.) "
-        f"from today or the last 24 hours. Cover Europe, Middle East, Asia, or global events. "
-        f"Return ONLY a valid JSON array. Each element: 'headline', 'summary' (2 sentences), "
-        f"'region' (e.g. 'Europe', 'Middle East', 'Asia'). No markdown, no preamble. Pure JSON."
+        "Search for 4 major international news stories (not US domestic) from today. "
+        "Return ONLY a JSON array. Each element: 'headline', 'summary' (2 sentences), "
+        "'region' (Europe/Middle East/Asia/Africa/Americas/Global). No markdown. Pure JSON."
     )
     r = _parse_json(text)
     return r if isinstance(r, list) and r else [
@@ -1230,28 +1413,47 @@ def html_el_paso_weekend(events: list) -> str:
     return out
 
 
-def html_el_paso_weekend(events: list) -> str:
-    if not events:
-        return '<p style="color:#888;font-size:15px;">No weekend listings found.</p>'
+def html_ep_restaurants(items: list) -> str:
+    if not items:
+        return f'<p style="color:{MOSS};font-size:15px;font-style:italic;">No restaurant news found.</p>'
+
+    STATUS_COLORS = {
+        "New Opening": (f"linear-gradient(135deg,{GREEN} 0%,#1A3D2E 100%)", GOLD_LT),
+        "Closed":      (f"linear-gradient(135deg,#8B1A00 0%,#4A0000 100%)", "#FFD0C0"),
+        "New Menu":    (f"linear-gradient(135deg,{PURPLE} 0%,#2A0A50 100%)", GOLD_LT),
+        "Review":      (f"linear-gradient(135deg,{CYPRESS} 0%,#3A1800 100%)", GOLD_LT),
+        "Food Truck":  (f"linear-gradient(135deg,{MOSS} 0%,#2A3A10 100%)", GOLD_LT),
+    }
     out = ""
-    for e in events:
+    for item in items:
+        status = item.get("status", "News")
+        bg, fg = STATUS_COLORS.get(status, (f"linear-gradient(135deg,{CYPRESS} 0%,#3A1800 100%)", GOLD_LT))
         url_html = ""
-        if e.get("url"):
-            url_html = (f'<a href="{e["url"]}" style="font-size:14px;color:#1565C0;'
-                        f'text-decoration:none;">Details →</a>')
+        if item.get("url"):
+            url_html = (f'<a href="{item["url"]}" style="font-size:14px;color:{GOLD};'
+                        f'font-weight:bold;text-decoration:none;">More info ⚜</a>')
         out += f"""
-        <div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #eee;
-                    display:flex;gap:14px;align-items:flex-start;">
-          <div style="min-width:72px;text-align:center;background:#e3f2fd;border-radius:6px;
-                      padding:6px 4px;border:1px solid #90caf9;">
-            <div style="font-size:12px;font-weight:bold;color:#1565C0;text-transform:uppercase;
-                        line-height:1.3;">{e.get('when','')}</div>
+        <div style="margin-bottom:14px;padding:14px;background:{IVORY};
+                    border-radius:6px;border:1px solid #E8DFC8;
+                    display:table;width:100%;box-sizing:border-box;">
+          <div style="display:table-cell;width:84px;vertical-align:top;padding-right:14px;">
+            <div style="background:{bg};border-radius:6px;padding:8px 4px;
+                        text-align:center;border:1px solid {GOLD};">
+              <div style="font-size:11px;font-weight:bold;color:{fg};
+                          text-transform:uppercase;line-height:1.4;letter-spacing:.3px;">
+                {status}
+              </div>
+            </div>
           </div>
-          <div style="flex:1;">
-            <div style="font-size:17px;font-weight:bold;color:#1a1a1a;">{e.get('name','')}</div>
-            <div style="font-size:14px;color:#888;margin:2px 0;">📍 {e.get('venue','')}</div>
-            <div style="font-size:15px;color:#555;margin-top:4px;line-height:1.5;">{e.get('description','')}</div>
-            <div style="margin-top:5px;">{url_html}</div>
+          <div style="display:table-cell;vertical-align:top;">
+            <div style="font-size:17px;font-weight:bold;color:{PURPLE};">{item.get('name','')}</div>
+            <div style="font-size:14px;color:{CYPRESS};margin:3px 0;font-style:italic;">
+              📍 {item.get('location','')}
+            </div>
+            <div style="font-size:15px;color:#5a5040;margin-top:5px;line-height:1.5;">
+              {item.get('description','')}
+            </div>
+            <div style="margin-top:7px;">{url_html}</div>
           </div>
         </div>"""
     return out
@@ -1375,6 +1577,10 @@ def build_email(d: dict) -> str:
     {html_snark(s.get("ep_weekend",""))}
     {html_el_paso_weekend(d["ep_weekend"])}
 
+    {h2("🍽️", "El Paso — Restaurant & Bar News")}
+    {html_snark(s.get("ep_restaurants",""))}
+    {html_ep_restaurants(d["ep_restaurants"])}
+
     {h2("🎬", "Movies in El Paso — Today's Showtimes")}
     {html_movies(d["movies"])}
 
@@ -1471,6 +1677,7 @@ def main():
         ("📈 Markets",               "markets",     get_markets),
         ("🎉 Louisiana festivals",   "la_festivals", get_louisiana_festivals),
         ("🌵 EP weekend events",     "ep_weekend",   get_el_paso_weekend),
+        ("🍽️  EP restaurants",       "ep_restaurants", get_ep_restaurants),
         ("📍 El Paso news",          "ep_news",      get_ep_news),
         ("🎬 Movies",                "movies",      get_movies_el_paso),
         ("🐯 LSU sports",            "lsu",         get_lsu_sports),
