@@ -109,17 +109,23 @@ def _claude(prompt: str, use_search: bool = True, max_tokens: int = 1400) -> str
                 timeout=90,
             )
             data = resp.json()
-            # Print API errors so they show up in GitHub Actions logs
             if "error" in data:
-                print(f"    ⚠️  API error: {data['error']}")
-                time.sleep(6)
+                err = data["error"]
+                print(f"    ⚠️  API error: {err}")
+                # Rate limit — wait longer before retry
+                if "rate_limit" in str(err.get("type","")):
+                    wait = 65 + (attempt * 30)
+                    print(f"    ⏳ Rate limit hit, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    time.sleep(10)
                 continue
             return "".join(
                 b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
             ).strip()
         except Exception as e:
             print(f"    ⚠️  Claude attempt {attempt + 1} failed: {e}")
-            time.sleep(6)
+            time.sleep(10)
     return "[]"
 
 
@@ -149,10 +155,10 @@ def _parse_json(raw: str) -> object:
 
 # ── El Paso local news RSS feeds ──────────────────────────────────────────────
 EP_NEWS_RSS = [
-    ("KVIA ABC-7",   "https://kvia.com/feed/"),
-    ("KFOX14",       "https://kfoxtv.com/feed/"),
-    ("KTSM NBC-9",   "https://www.ktsm.com/feed/"),
-    ("El Paso Inc.", "https://elpasoinc.com/feed/"),
+    ("KVIA ABC-7", "https://kvia.com/feed/"),
+    ("KTSM NBC-9", "https://www.ktsm.com/feed/"),
+    ("KDBC CBS-4", "https://kdbc.com/feed/"),
+    ("El Paso Matters", "https://elpasomatters.org/feed/"),
 ]
 
 # ── Military tech / defense RSS feeds ─────────────────────────────────────────
@@ -160,9 +166,9 @@ MILTECH_RSS = [
     ("C4ISRNET",        "https://www.c4isrnet.com/arc/outboundfeeds/rss/?outputType=xml"),
     ("Defense One",     "https://www.defenseone.com/rss/all/"),
     ("War on the Rocks","https://warontherocks.com/feed/"),
-    ("AUSA News",       "https://www.ausa.org/news/rss.xml"),
-    ("NDIA",            "https://www.ndia.org/rss/news"),
+    ("AUSA",            "https://www.ausa.org/rss.xml"),
     ("Breaking Defense","https://breakingdefense.com/feed/"),
+    ("Defense Post",    "https://thedefensepost.com/feed/"),
 ]
 
 # Keywords to flag as M&S / LVC relevant for category tagging
@@ -363,11 +369,11 @@ def get_lsu_sports() -> dict:
 
 
 LA_NEWS_RSS = [
-    ("WWL-TV",       "https://www.wwltv.com/feeds/syndication/rss/news"),
-    ("WDSU",         "https://www.wdsu.com/rss"),
-    ("The Advocate", "https://www.theadvocate.com/search/?f=rss&t=article&l=50&s=start_time&sd=desc"),
-    ("WAFB",         "https://www.wafb.com/rss/headlines"),
-    ("WVUE Fox 8",   "https://www.fox8live.com/rss/headlines"),
+    ("WWL-TV",    "https://www.wwltv.com/feeds/syndication/rss/"),
+    ("WDSU",      "https://www.wdsu.com/rss"),
+    ("WBRZ",      "https://www.wbrz.com/rss/headlines/"),
+    ("WVUE",      "https://www.fox8live.com/rss/"),
+    ("Nola.com",  "https://www.nola.com/search/?f=rss&t=article&l=50&s=start_time&sd=desc"),
 ]
 
 LA_AREA_MAP = {
@@ -651,7 +657,7 @@ DOD_RSS_FEEDS = [
 
 # CRS RSS / search feed
 CRS_RSS_URL = "https://crsreports.congress.gov/search/#/?termsToSearch=defense+army+military&orderBy=Date"
-CRS_RSS_FEED = "https://crsreports.congress.gov/search/rss?term=defense+military+army+simulation&r=1&order=1"
+CRS_RSS_FEED = "https://crsreports.congress.gov/search/rss?term=defense+military+army&r=1&order=1"
 
 
 def get_dod_army_news() -> list:
@@ -765,9 +771,9 @@ def get_crs_links() -> list:
 
 WORLD_NEWS_RSS = [
     ("BBC World",  "http://feeds.bbci.co.uk/news/world/rss.xml"),
-    ("Reuters",    "https://feeds.reuters.com/reuters/worldNews"),
-    ("AP News",    "https://rsshub.app/apnews/topics/world-news"),
+    ("Reuters",    "https://feeds.reuters.com/reuters/topNews"),
     ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+    ("RFI",        "https://www.rfi.fr/en/rss"),
 ]
 
 WORLD_REGION_MAP = {
@@ -927,9 +933,9 @@ def get_saints_scores() -> dict:
 
 # TRADOC and exercise-relevant RSS feeds
 TRADOC_RSS = [
-    ("TRADOC News",    "https://www.army.mil/rss/tradoc/"),
-    ("Army.mil News",  "https://www.army.mil/rss/"),
-    ("ARNEWS",         "https://www.army.mil/rss/arnews/"),
+    ("Army.mil",       "https://www.army.mil/rss/2/"),
+    ("FORSCOM",        "https://www.army.mil/rss/112/"),
+    ("Army News",      "https://www.army.mil/rss/174/"),
 ]
 
 EXERCISE_KEYWORDS = [
@@ -2005,48 +2011,59 @@ def send_email(html_body: str):
 
 def main():
     steps = [
-        ("📈 Markets",               "markets",     get_markets),
-        ("⚜  Saints/Pelicans",       "saints",          get_saints_scores),
-        ("🦞 LA seafood report",     "seafood",         get_louisiana_seafood),
-        ("🎯 TRADOC news",           "tradoc_news",     get_tradoc_news),
+        ("📈 Markets",               "markets",           get_markets),
+        ("⚜  Saints/Pelicans",       "saints",            get_saints_scores),
+        ("🦞 LA seafood report",     "seafood",           get_louisiana_seafood),
+        ("🎉 Louisiana festivals",   "la_festivals",      get_louisiana_festivals),
+        ("🎯 TRADOC news",           "tradoc_news",       get_tradoc_news),
         ("📅 Exercise schedule",     "exercise_schedule", get_exercise_schedule),
-        ("🌵 EP weekend events",     "ep_weekend",   get_el_paso_weekend),
-        ("🍽️  EP restaurants",       "ep_restaurants", get_ep_restaurants),
-        ("📍 El Paso news",          "ep_news",      get_ep_news),
-        ("🎬 Movies",                "movies",      get_movies_el_paso),
-        ("🐯 LSU sports",            "lsu",         get_lsu_sports),
-        ("🌿 Louisiana news",        "louisiana",   get_louisiana_news),
-        ("📚 Philosopher quotes",    "quotes",      get_philosopher_quotes),
-        ("🔤 Word of the day",       "word",        get_word_of_the_day),
-        ("📅 On this day",           "on_this_day", get_on_this_day),
-        ("🪖 DoD/Army news",         "dod_news",    get_dod_army_news),
-        ("💰 Defense budget",        "budget_news", get_defense_budget_news),
-        ("📋 CRS reports",           "crs",         get_crs_links),
-        ("🌍 World news",            "world_news",  get_world_news),
-        ("🛡️  Military tech links",  "miltech",     get_military_tech_links),
-        ("🍳 Ingredient of the day", "ingredient",  get_ingredient_of_the_day),
+        ("🌵 EP weekend events",     "ep_weekend",        get_el_paso_weekend),
+        ("🍽️  EP restaurants",       "ep_restaurants",    get_ep_restaurants),
+        ("📍 El Paso news",          "ep_news",           get_ep_news),
+        ("🎬 Movies",                "movies",            get_movies_el_paso),
+        ("🐯 LSU sports",            "lsu",               get_lsu_sports),
+        ("🌿 Louisiana news",        "louisiana",         get_louisiana_news),
+        ("📚 Philosopher quotes",    "quotes",            get_philosopher_quotes),
+        ("🔤 Word of the day",       "word",              get_word_of_the_day),
+        ("📅 On this day",           "on_this_day",       get_on_this_day),
+        ("🪖 DoD/Army news",         "dod_news",          get_dod_army_news),
+        ("💰 Defense budget",        "budget_news",       get_defense_budget_news),
+        ("📋 CRS reports",           "crs",               get_crs_links),
+        ("🌍 World news",            "world_news",        get_world_news),
+        ("🛡️  Military tech links",  "miltech",           get_military_tech_links),
+        ("🍳 Ingredient of the day", "ingredient",        get_ingredient_of_the_day),
     ]
 
-    data = {}
+    # Safe defaults for every key — build_email never crashes on missing key
+    data = {
+        "weather": {}, "other_news": {},
+        "markets": {}, "saints": {}, "seafood": {}, "la_festivals": [],
+        "tradoc_news": [], "exercise_schedule": [], "ep_weekend": [],
+        "ep_restaurants": [], "ep_news": [], "movies": [], "lsu": {},
+        "louisiana": [], "quotes": [], "word": {}, "on_this_day": {},
+        "dod_news": [], "budget_news": [], "crs": [], "world_news": [],
+        "miltech": [], "ingredient": {}, "snark": {},
+    }
 
-    # Weather fetched separately (multiple locations)
+    # Weather (free API, no rate limit)
     print("🌤  Fetching weather...")
-    data["weather"] = {}
     for city, (lat, lon) in LOCATIONS.items():
         print(f"    → {city}")
         data["weather"][city] = get_weather(lat, lon)
 
-    # Regional news
+    # Regional news (Claude calls — add delay after)
     print("📰 Fetching regional news...")
     data["other_news"] = {
         "Ellensburg, WA":  get_news("Ellensburg Washington local news", 2),
         "Pearl River, LA": get_news("Pearl River Louisiana Slidell Northshore local news", 2),
     }
+    time.sleep(5)
 
-    # All other sections
+    # All other sections — 5s pause after each Claude-based call
     for label, key, fn in steps:
         print(f"{label}...")
         data[key] = fn()
+        time.sleep(5)  # breathing room between API calls
 
     print("😏 Generating snarky commentary...")
     data["snark"] = get_snarky_comments(data)
