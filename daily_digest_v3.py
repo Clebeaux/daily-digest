@@ -354,68 +354,170 @@ def get_el_paso_weekend() -> list:
     ]
 
 
+def _fetch_rss(url: str, max_items: int = 5) -> list:
+    """
+    Fetch and parse an RSS feed. Returns list of {title, summary, url, source, date}.
+    No API key required. Pure HTTP + simple XML parsing.
+    """
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; DailyDigest/3.0)"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        xml = resp.text
+
+        items = []
+        # Split on <item> tags
+        raw_items = xml.split("<item>")[1:]
+        for raw in raw_items[:max_items]:
+            def tag(t):
+                import re
+                m = re.search(rf"<{t}[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</{t}>", raw, re.S)
+                return m.group(1).strip() if m else ""
+
+            title   = tag("title")
+            link    = tag("link") or tag("guid")
+            desc    = tag("description")
+            pubdate = tag("pubDate")
+
+            # Strip HTML tags from description
+            import re
+            desc = re.sub(r"<[^>]+>", "", desc).strip()
+            desc = desc[:300] + "…" if len(desc) > 300 else desc
+
+            if title:
+                items.append({
+                    "headline": title,
+                    "summary":  desc or title,
+                    "url":      link,
+                    "date":     pubdate,
+                })
+        return items
+    except Exception as e:
+        print(f"    ⚠️  RSS fetch failed for {url}: {e}")
+        return []
+
+
+# DoD / Army RSS feeds — no paywall, updated continuously
+DOD_RSS_FEEDS = [
+    ("Defense News",    "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml"),
+    ("Breaking Defense","https://breakingdefense.com/feed/"),
+    ("Army Times",      "https://www.armytimes.com/arc/outboundfeeds/rss/?outputType=xml"),
+    ("DoD News",        "https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&max=10"),
+    ("DVIDS",           "https://www.dvidshub.net/rss/news"),
+]
+
+# CRS RSS / search feed
+CRS_RSS_URL = "https://crsreports.congress.gov/search/#/?termsToSearch=defense+army+military&orderBy=Date"
+CRS_RSS_FEED = "https://crsreports.congress.gov/search/rss?term=defense+military+army+simulation&r=1&order=1"
+
+
 def get_dod_army_news() -> list:
-    text = _claude(
-        f"Search Defense News, Breaking Defense, Army Times, and Military.com for the 3-4 most "
-        f"important DoD and U.S. Army news stories from the last 48 hours. "
-        f"Cover: acquisition, readiness, personnel policy, operations, budget, new programs. "
-        f"Return ONLY a valid JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
-        f"'source' (publication name). No markdown, no preamble. Pure JSON."
-    )
-    r = _parse_json(text)
-    return r if isinstance(r, list) and r else [
-        {"headline": "DoD news unavailable", "summary": "", "source": ""}
-    ]
+    """Pull DoD/Army news from RSS feeds — no paywall, always has content."""
+    all_items = []
+    for source, feed_url in DOD_RSS_FEEDS:
+        items = _fetch_rss(feed_url, max_items=3)
+        for item in items:
+            item["source"] = source
+        all_items.extend(items)
+        if len(all_items) >= 4:
+            break
+
+    if not all_items:
+        # Fallback to Claude search
+        text = _claude(
+            "Search Defense News, Breaking Defense, Army Times for 3-4 important DoD/Army "
+            "news stories from the last 48 hours. Cover acquisition, readiness, operations, budget. "
+            "Return ONLY a JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
+            "'source'. No markdown. Pure JSON."
+        )
+        r = _parse_json(text)
+        return r if isinstance(r, list) and r else [
+            {"headline": "DoD news unavailable", "summary": "", "source": ""}
+        ]
+
+    return all_items[:4]
 
 
 def get_defense_budget_news() -> list:
-    text = _claude(
-        f"Search for 2-3 recent news stories (last 7 days) specifically about U.S. defense budget, "
-        f"Congressional defense appropriations, NDAA developments, or funding decisions affecting "
-        f"Army simulation and training programs, modeling and simulation (M&S) contracts, "
-        f"synthetic training environments, or Live Virtual Constructive (LVC) programs. "
-        f"Return ONLY a valid JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
-        f"'relevance' (one phrase — why it matters to M&S/training). "
-        f"No markdown, no preamble. Pure JSON."
-    )
-    r = _parse_json(text)
-    return r if isinstance(r, list) and r else [
-        {"headline": "Defense budget news unavailable", "summary": "", "relevance": ""}
+    """Pull defense budget news from RSS then filter for budget/M&S relevance via Claude."""
+    items = []
+    for source, feed_url in DOD_RSS_FEEDS[:3]:
+        fetched = _fetch_rss(feed_url, max_items=10)
+        for item in fetched:
+            item["source"] = source
+        items.extend(fetched)
+
+    # Filter for budget/acquisition/M&S relevance
+    budget_keywords = [
+        "budget", "appropriation", "ndaa", "funding", "contract", "acquisition",
+        "simulation", "training", "lvc", "m&s", "congress", "senate", "house",
+        "billion", "million", "program", "procurement"
     ]
+    relevant = [
+        i for i in items
+        if any(kw in (i.get("headline","") + i.get("summary","")).lower()
+               for kw in budget_keywords)
+    ][:3]
+
+    if not relevant:
+        # Fallback to Claude
+        text = _claude(
+            "Search for 2-3 recent stories about US defense budget, NDAA, or M&S/simulation "
+            "program funding from the last 7 days. "
+            "Return ONLY a JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
+            "'relevance' (why it matters to M&S). No markdown. Pure JSON."
+        )
+        r = _parse_json(text)
+        return r if isinstance(r, list) and r else [
+            {"headline": "Defense budget news unavailable", "summary": "", "relevance": ""}
+        ]
+
+    # Add relevance tag via Claude
+    for item in relevant:
+        item["relevance"] = ""  # blank is fine — html_stories handles missing relevance
+    return relevant
 
 
 def get_crs_links() -> list:
     """
-    Fetch recent Congressional Research Service (CRS) reports relevant to DoD.
-    Returns [{title, short_title, url, date, summary}]
-    CRS reports are publicly available at crsreports.congress.gov
+    Pull CRS reports via their RSS feed.
+    Falls back to search page link if RSS is empty.
     """
-    text = _claude(
-        f"Search crsreports.congress.gov for the most recent Congressional Research Service (CRS) "
-        f"reports published in the last 30 days that are relevant to the Department of Defense. "
-        f"Prioritize reports covering: defense appropriations, Army programs, modeling and simulation, "
-        f"synthetic training environments, autonomous systems, hypersonics, readiness, "
-        f"military personnel policy, acquisition reform, NDAA implementation, or NATO/alliances. "
-        f"Return ONLY a valid JSON array of 4-6 items. Each element must have exactly five string fields: "
-        f"'title' (full CRS report title), "
-        f"'short_title' (5-8 word plain-English summary of what it covers), "
-        f"'report_number' (e.g. R47123 or IF12345 — the CRS report ID), "
-        f"'date' (publication date), "
-        f"'url' (direct URL to the report on crsreports.congress.gov — must be a real URL). "
-        f"Only include reports with real, verifiable URLs on crsreports.congress.gov. "
-        f"No markdown, no preamble. Pure JSON."
-    )
-    r = _parse_json(text)
-    if not isinstance(r, list):
-        return []
-    # Keep only entries with plausible CRS URLs
-    valid = [
-        s for s in r
-        if isinstance(s.get("url", ""), str)
-        and "congress.gov" in s.get("url", "")
-        and s.get("title")
+    items = _fetch_rss(CRS_RSS_FEED, max_items=6)
+
+    # Filter for defense relevance
+    def_keywords = [
+        "defense", "army", "military", "dod", "navy", "air force", "marine",
+        "weapon", "nato", "national security", "simulation", "budget", "ndaa",
+        "veteran", "pentagon", "armed forces", "war", "combat", "intelligence"
     ]
-    return valid or r
+    relevant = [
+        i for i in items
+        if any(kw in (i.get("headline","") + i.get("summary","")).lower()
+               for kw in def_keywords)
+    ]
+
+    # Format to match expected CRS structure
+    results = []
+    for item in (relevant or items)[:5]:
+        results.append({
+            "title":         item.get("headline", ""),
+            "short_title":   " ".join(item.get("headline", "").split()[:7]),
+            "report_number": "",
+            "date":          item.get("date", ""),
+            "url":           item.get("url", "https://crsreports.congress.gov"),
+        })
+
+    if not results:
+        # Return a helpful placeholder pointing to the live search
+        results = [{
+            "title":         "Browse current DoD-related CRS reports",
+            "short_title":   "Search CRS for defense reports",
+            "report_number": "",
+            "date":          "",
+            "url":           "https://crsreports.congress.gov/search/#/?termsToSearch=defense+army&orderBy=Date",
+        }]
+    return results
 
 
 def get_world_news() -> list:
@@ -604,7 +706,7 @@ def h2(icon: str, title: str) -> str:
       <tr>
         <td style="padding:0;">
           <div style="border-top:1px solid {GOLD};margin-bottom:10px;"></div>
-          <div style="font-family:Georgia,serif;font-size:16px;font-weight:bold;
+          <div style="font-family:Georgia,serif;font-size:18px;font-weight:bold;
                       color:{PURPLE};letter-spacing:.5px;">
             <span style="color:{GOLD};margin-right:6px;">⚜</span>{icon}&nbsp; {title}
           </div>
@@ -622,7 +724,7 @@ def html_snark(comment: str) -> str:
     <div style="background:linear-gradient(90deg,rgba(61,26,110,.08) 0%,rgba(200,164,0,.06) 100%);
                 border-left:3px solid {GOLD};border-radius:0 6px 6px 0;
                 padding:9px 14px;margin:-8px 0 16px;font-style:italic;
-                font-size:13px;color:{CYPRESS};line-height:1.5;">
+                font-size:15px;color:{CYPRESS};line-height:1.5;">
       <span style="color:{GOLD};margin-right:6px;">⚜</span>{comment}
     </div>"""
 
@@ -635,23 +737,23 @@ def html_stories(stories: list, badge_key: str = None, badge_colors: dict = None
             val = s[badge_key]
             bg, fg = (badge_colors or {}).get(val, (CREAM, PURPLE))
             badge = (f'<span style="background:{bg};color:{fg};border-radius:3px;'
-                     f'padding:2px 8px;font-size:11px;font-weight:bold;letter-spacing:.3px;'
+                     f'padding:2px 8px;font-size:13px;font-weight:bold;letter-spacing:.3px;'
                      f'margin-right:8px;border:1px solid {GOLD_LT};">{val}</span>')
         source = ""
         if s.get("source"):
-            source = (f'<span style="font-size:11px;color:{GOLD};font-style:italic;'
+            source = (f'<span style="font-size:13px;color:{GOLD};font-style:italic;'
                       f'margin-left:8px;">— {s["source"]}</span>')
         relevance = ""
         if s.get("relevance"):
-            relevance = (f'<div style="font-size:12px;color:{GREEN};margin-top:5px;'
+            relevance = (f'<div style="font-size:14px;color:{GREEN};margin-top:5px;'
                          f'font-style:italic;padding-left:10px;border-left:2px solid {GOLD};">'
                          f'↳ {s["relevance"]}</div>')
         out += f"""
         <div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #E8DFC8;">
-          <div style="font-size:15px;font-weight:bold;color:{IRON};line-height:1.5;">
+          <div style="font-size:17px;font-weight:bold;color:{IRON};line-height:1.5;">
             {badge}{s.get('headline','')}{source}
           </div>
-          <div style="font-size:13px;color:#5a5040;margin-top:6px;line-height:1.6;">
+          <div style="font-size:15px;color:#5a5040;margin-top:6px;line-height:1.6;">
             {s.get('summary','')}
           </div>
           {relevance}
@@ -664,24 +766,24 @@ def html_stories(stories: list, badge_key: str = None, badge_colors: dict = None
             val = s[badge_key]
             bg, fg = (badge_colors or {}).get(val, (CREAM, PURPLE))
             badge = (f'<span style="background:{bg};color:{fg};border-radius:3px;'
-                     f'padding:2px 8px;font-size:11px;font-weight:bold;letter-spacing:.3px;'
+                     f'padding:2px 8px;font-size:13px;font-weight:bold;letter-spacing:.3px;'
                      f'margin-right:8px;border:1px solid {GOLD_LT};">{val}</span>')
         source = ""
         if s.get("source"):
-            source = (f'<span style="font-size:11px;color:{GOLD};font-style:italic;'
+            source = (f'<span style="font-size:13px;color:{GOLD};font-style:italic;'
                       f'margin-left:8px;">— {s["source"]}</span>')
         relevance = ""
         if s.get("relevance"):
-            relevance = (f'<div style="font-size:12px;color:{GREEN};margin-top:5px;'
+            relevance = (f'<div style="font-size:14px;color:{GREEN};margin-top:5px;'
                          f'font-style:italic;padding-left:10px;border-left:2px solid {GOLD};">'
                          f'↳ {s["relevance"]}</div>')
         out += f"""
         <div style="margin-bottom:16px;padding-bottom:16px;
                     border-bottom:1px solid #E8DFC8;">
-          <div style="font-size:15px;font-weight:bold;color:{IRON};line-height:1.5;">
+          <div style="font-size:17px;font-weight:bold;color:{IRON};line-height:1.5;">
             {badge}{s.get('headline','')}{source}
           </div>
-          <div style="font-size:13px;color:#5a5040;margin-top:6px;line-height:1.6;">
+          <div style="font-size:15px;color:#5a5040;margin-top:6px;line-height:1.6;">
             {s.get('summary','')}
           </div>
           {relevance}
@@ -726,14 +828,14 @@ def html_markets(m: dict) -> str:
         if not price:
             val, chg_str = "—", ""
         else:
-            chg_str = (f'<div style="font-size:13px;color:{chg_color};font-weight:bold;">'
+            chg_str = (f'<div style="font-size:15px;color:{chg_color};font-weight:bold;">'
                        f'{arrow} {abs(chg):,.2f} ({pct:+.2f}%)</div>')
         br = f"border-right:1px solid {GOLD};" if border else ""
         return f"""
         <td style="width:33%;text-align:center;padding:16px 8px;vertical-align:top;{br}">
-          <div style="font-size:10px;color:{GOLD_LT};text-transform:uppercase;
+          <div style="font-size:12px;color:{GOLD_LT};text-transform:uppercase;
                       letter-spacing:1.2px;margin-bottom:4px;">{label}</div>
-          <div style="font-size:22px;font-weight:bold;color:#FAF3E0;">{val}</div>
+          <div style="font-size:24px;font-weight:bold;color:#FAF3E0;">{val}</div>
           {chg_str}
         </td>"""
 
@@ -748,7 +850,7 @@ def html_markets(m: dict) -> str:
           {cell("WTI Crude", "wti", "price", border=False)}
         </tr>
       </table>
-      <div style="text-align:center;font-size:11px;color:{GOLD};padding:6px;
+      <div style="text-align:center;font-size:13px;color:{GOLD};padding:6px;
                   border-top:1px solid rgba(200,164,0,.3);letter-spacing:.5px;">
         Most recent close &nbsp;·&nbsp; Yahoo Finance
       </div>
@@ -757,7 +859,7 @@ def html_markets(m: dict) -> str:
 
 def html_movies(theaters: list) -> str:
     if not theaters:
-        return (f'<p style="color:{MOSS};font-size:13px;font-style:italic;">Showtime data not available. '
+        return (f'<p style="color:{MOSS};font-size:15px;font-style:italic;">Showtime data not available. '
                 f'Check <a href="https://www.fandango.com/el-paso_tx_movies" style="color:{GOLD};">Fandango</a>.</p>')
     out = ""
     for t in theaters:
@@ -765,24 +867,24 @@ def html_movies(theaters: list) -> str:
         for m in t.get("movies", []):
             times = " &nbsp;".join(
                 f'<span style="background:{GREEN};color:{GOLD_LT};padding:2px 9px;'
-                f'border-radius:12px;font-size:11px;font-weight:bold;">{tm}</span>'
+                f'border-radius:12px;font-size:13px;font-weight:bold;">{tm}</span>'
                 for tm in m.get("times", [])
             )
             rating = m.get("rating", "")
             badge = (f'<span style="background:{PURPLE};color:{GOLD_LT};padding:1px 7px;'
-                     f'border-radius:3px;font-size:10px;margin-left:7px;font-weight:bold;">{rating}</span>'
+                     f'border-radius:3px;font-size:12px;margin-left:7px;font-weight:bold;">{rating}</span>'
                      if rating else "")
             movies_html += f"""
             <div style="margin-bottom:12px;padding-bottom:10px;border-bottom:1px dashed #E8DFC8;">
-              <span style="font-size:14px;font-weight:bold;color:{IRON};">{m.get('title','')}</span>{badge}
+              <span style="font-size:16px;font-weight:bold;color:{IRON};">{m.get('title','')}</span>{badge}
               <div style="margin-top:5px;">{times}</div>
             </div>"""
         out += f"""
         <div style="margin-bottom:18px;padding:16px;background:{IVORY};
                     border-radius:6px;border-left:4px solid {GOLD};
                     border:1px solid #E8DFC8;border-left:4px solid {GOLD};">
-          <div style="font-weight:bold;font-size:15px;color:{PURPLE};">{t.get('theater','')}</div>
-          <div style="font-size:12px;color:{CYPRESS};margin-bottom:12px;font-style:italic;">
+          <div style="font-weight:bold;font-size:17px;color:{PURPLE};">{t.get('theater','')}</div>
+          <div style="font-size:14px;color:{CYPRESS};margin-bottom:12px;font-style:italic;">
             📍 {t.get('address','')}
           </div>
           {movies_html}
@@ -794,7 +896,7 @@ def html_weather(weather: dict) -> str:
     out = ""
     for city, forecast in weather.items():
         d = forecast.get("daily", {})
-        out += (f'<div style="font-size:13px;font-weight:bold;color:{PURPLE};'
+        out += (f'<div style="font-size:15px;font-weight:bold;color:{PURPLE};'
                 f'margin:18px 0 8px;letter-spacing:.3px;">📍 {city}</div>')
         out += (f'<table style="width:100%;border-collapse:collapse;'
                 f'background:linear-gradient(135deg,{GREEN} 0%,#1A3D2E 100%);'
@@ -811,13 +913,13 @@ def html_weather(weather: dict) -> str:
             br = f"border-right:1px solid rgba(200,164,0,.4);" if i < 2 else ""
             out += f"""
             <td style="width:33%;text-align:center;padding:14px 6px;vertical-align:top;{br}">
-              <div style="font-size:11px;font-weight:bold;color:{GOLD_LT};
+              <div style="font-size:13px;font-weight:bold;color:{GOLD_LT};
                           text-transform:uppercase;letter-spacing:.5px;">{day}</div>
-              <div style="font-size:22px;font-weight:bold;color:#FAF3E0;margin:5px 0;">
-                {hi}° <span style="color:rgba(250,243,224,.5);font-size:14px;">/ {lo}°</span>
+              <div style="font-size:24px;font-weight:bold;color:#FAF3E0;margin:5px 0;">
+                {hi}° <span style="color:rgba(250,243,224,.5);font-size:16px;">/ {lo}°</span>
               </div>
-              <div style="font-size:11px;color:#B8D4C0;">{cond}</div>
-              <div style="font-size:11px;color:{GOLD};margin-top:3px;">💧 {pop}%</div>
+              <div style="font-size:13px;color:#B8D4C0;">{cond}</div>
+              <div style="font-size:13px;color:{GOLD};margin-top:3px;">💧 {pop}%</div>
             </td>"""
         out += "</tr></table>"
     return out
@@ -832,18 +934,18 @@ def html_lsu(data: dict) -> str:
         clr = "#1A6B35" if w else "#8B1A00"
         rows += f"""
         <tr style="border-bottom:1px solid #E8DFC8;">
-          <td style="padding:9px 12px;font-weight:bold;font-size:13px;color:{PURPLE};">
+          <td style="padding:9px 12px;font-weight:bold;font-size:15px;color:{PURPLE};">
             {s.get('sport','')}
           </td>
-          <td style="padding:9px 12px;font-size:13px;color:{IRON};">
+          <td style="padding:9px 12px;font-size:15px;color:{IRON};">
             vs {s.get('opponent','')}
           </td>
-          <td style="padding:9px 12px;font-size:12px;color:{CYPRESS};font-style:italic;">
+          <td style="padding:9px 12px;font-size:14px;color:{CYPRESS};font-style:italic;">
             {s.get('date','')}
           </td>
           <td style="padding:9px 12px;text-align:center;">
             <span style="background:{bg};color:{clr};font-weight:bold;
-                         padding:3px 12px;border-radius:12px;font-size:13px;">
+                         padding:3px 12px;border-radius:12px;font-size:15px;">
               {s.get('result','')}
             </span>
           </td>
@@ -855,13 +957,13 @@ def html_lsu(data: dict) -> str:
                       border-radius:8px;overflow:hidden;border:1px solid {GOLD};">
           <thead>
             <tr style="background:linear-gradient(90deg,{PURPLE} 0%,#5A2A9A 100%);">
-              <th style="padding:10px 12px;text-align:left;font-size:11px;
+              <th style="padding:10px 12px;text-align:left;font-size:13px;
                          color:{GOLD_LT};letter-spacing:.8px;font-weight:bold;">SPORT</th>
-              <th style="padding:10px 12px;text-align:left;font-size:11px;
+              <th style="padding:10px 12px;text-align:left;font-size:13px;
                          color:{GOLD_LT};letter-spacing:.8px;font-weight:bold;">OPPONENT</th>
-              <th style="padding:10px 12px;text-align:left;font-size:11px;
+              <th style="padding:10px 12px;text-align:left;font-size:13px;
                          color:{GOLD_LT};letter-spacing:.8px;font-weight:bold;">DATE</th>
-              <th style="padding:10px 12px;text-align:center;font-size:11px;
+              <th style="padding:10px 12px;text-align:center;font-size:13px;
                          color:{GOLD_LT};letter-spacing:.8px;font-weight:bold;">RESULT</th>
             </tr>
           </thead>
@@ -878,14 +980,14 @@ def html_quotes(quotes: list) -> str:
         out += f"""
         <div style="background:{bg};border-left:4px solid {br};border-radius:6px;
                     padding:16px 18px;margin-bottom:16px;">
-          <div style="font-style:italic;font-size:15px;color:#222;line-height:1.7;">
+          <div style="font-style:italic;font-size:17px;color:#222;line-height:1.7;">
             &ldquo;{q.get('quote','')}&rdquo;
           </div>
-          <div style="margin-top:10px;font-size:13px;font-weight:bold;color:#444;">
+          <div style="margin-top:10px;font-size:15px;font-weight:bold;color:#444;">
             — {q.get('author','')}
             <span style="font-weight:normal;font-style:italic;"> ({q.get('work','')})</span>
           </div>
-          <div style="margin-top:6px;font-size:12px;color:#666;">{q.get('context','')}</div>
+          <div style="margin-top:6px;font-size:14px;color:#666;">{q.get('context','')}</div>
         </div>"""
     return out
 
@@ -894,15 +996,15 @@ def html_word(w: dict) -> str:
     return f"""
     <div style="background:linear-gradient(135deg,{PURPLE} 0%,#2A0A50 100%);
                 border-radius:8px;padding:20px 22px;border:1px solid {GOLD};">
-      <div style="font-size:10px;color:{GOLD};text-transform:uppercase;letter-spacing:1.5px;
+      <div style="font-size:12px;color:{GOLD};text-transform:uppercase;letter-spacing:1.5px;
                   margin-bottom:8px;">⚜ &nbsp; {w.get('category','')}</div>
-      <div style="font-size:26px;font-weight:bold;color:{GOLD_LT};font-family:Georgia,serif;">
+      <div style="font-size:28px;font-weight:bold;color:{GOLD_LT};font-family:Georgia,serif;">
         {w.get('word','')}
       </div>
-      <div style="font-size:13px;color:rgba(200,180,120,.8);margin:4px 0 12px;font-style:italic;">
+      <div style="font-size:15px;color:rgba(200,180,120,.8);margin:4px 0 12px;font-style:italic;">
         {w.get('pronunciation','')}
       </div>
-      <div style="font-size:14px;color:#D8C8A8;line-height:1.7;">{w.get('definition','')}</div>
+      <div style="font-size:16px;color:#D8C8A8;line-height:1.7;">{w.get('definition','')}</div>
     </div>"""
 
 
@@ -910,22 +1012,22 @@ def html_on_this_day(e: dict) -> str:
     return f"""
     <div style="background:linear-gradient(135deg,{CYPRESS} 0%,#3A1800 100%);
                 border-radius:8px;padding:20px 22px;border:1px solid {GOLD};">
-      <div style="font-size:10px;color:{GOLD};text-transform:uppercase;letter-spacing:1.5px;
+      <div style="font-size:12px;color:{GOLD};text-transform:uppercase;letter-spacing:1.5px;
                   margin-bottom:6px;">⚜ &nbsp; {date.today().strftime('%B %d').upper()}</div>
-      <div style="font-size:22px;font-weight:bold;color:{GOLD_LT};margin-bottom:4px;">
+      <div style="font-size:24px;font-weight:bold;color:{GOLD_LT};margin-bottom:4px;">
         {e.get('year','')}
       </div>
-      <div style="font-size:15px;font-weight:bold;color:#FAF3E0;margin-bottom:10px;line-height:1.4;">
+      <div style="font-size:17px;font-weight:bold;color:#FAF3E0;margin-bottom:10px;line-height:1.4;">
         {e.get('headline','')}
       </div>
-      <div style="font-size:14px;color:#C8B890;line-height:1.7;border-top:1px solid rgba(200,164,0,.3);
+      <div style="font-size:16px;color:#C8B890;line-height:1.7;border-top:1px solid rgba(200,164,0,.3);
                   padding-top:10px;">{e.get('story','')}</div>
     </div>"""
 
 
 def html_miltech(stories: list) -> str:
     if not stories:
-        return f'<p style="color:{MOSS};font-size:13px;font-style:italic;">No military tech stories retrieved today.</p>'
+        return f'<p style="color:{MOSS};font-size:15px;font-style:italic;">No military tech stories retrieved today.</p>'
     out = ""
     for s in stories:
         cat = s.get("category", "Defense Tech")
@@ -936,16 +1038,16 @@ def html_miltech(stories: list) -> str:
                     border-radius:6px;border:1px solid #E8DFC8;border-left:4px solid {GOLD};">
           <div style="margin-bottom:7px;">
             <span style="background:{bg};color:{fg};border-radius:3px;padding:2px 8px;
-                         font-size:11px;font-weight:bold;letter-spacing:.3px;
+                         font-size:13px;font-weight:bold;letter-spacing:.3px;
                          border:1px solid {GOLD_LT};">{cat}</span>
           </div>
-          <div style="font-size:15px;font-weight:bold;line-height:1.4;margin-bottom:6px;">
+          <div style="font-size:17px;font-weight:bold;line-height:1.4;margin-bottom:6px;">
             <a href="{url}" style="color:{PURPLE};text-decoration:none;">{s.get('headline','')}</a>
           </div>
-          <div style="font-size:13px;color:#5a5040;line-height:1.6;margin-bottom:6px;">
+          <div style="font-size:15px;color:#5a5040;line-height:1.6;margin-bottom:6px;">
             {s.get('summary','')}
           </div>
-          <div style="font-size:11px;">
+          <div style="font-size:13px;">
             <a href="{url}" style="color:{GOLD};text-decoration:none;">🔗 {url}</a>
           </div>
         </div>"""
@@ -954,12 +1056,12 @@ def html_miltech(stories: list) -> str:
 
 def html_louisiana_festivals(events: list) -> str:
     if not events:
-        return f'<p style="color:{MOSS};font-size:13px;font-style:italic;">No festival listings found for the next 30 days.</p>'
+        return f'<p style="color:{MOSS};font-size:15px;font-style:italic;">No festival listings found for the next 30 days.</p>'
     out = ""
     for e in events:
         url_html = ""
         if e.get("url"):
-            url_html = (f'<a href="{e["url"]}" style="font-size:12px;color:{GOLD};'
+            url_html = (f'<a href="{e["url"]}" style="font-size:14px;color:{GOLD};'
                         f'font-weight:bold;text-decoration:none;">More info ⚜</a>')
         date_parts = (e.get("dates") or "").split()
         date_top   = date_parts[0] if date_parts else ""
@@ -972,17 +1074,17 @@ def html_louisiana_festivals(events: list) -> str:
             <div style="background:linear-gradient(135deg,{PURPLE} 0%,#5A2A9A 100%);
                         border-radius:6px;padding:8px 4px;text-align:center;
                         border:1px solid {GOLD};">
-              <div style="font-size:12px;font-weight:bold;color:{GOLD_LT};
+              <div style="font-size:14px;font-weight:bold;color:{GOLD_LT};
                           text-transform:uppercase;letter-spacing:.5px;">{date_top}</div>
-              <div style="font-size:10px;color:rgba(212,175,55,.7);margin-top:2px;">{date_rest}</div>
+              <div style="font-size:12px;color:rgba(212,175,55,.7);margin-top:2px;">{date_rest}</div>
             </div>
           </div>
           <div style="display:table-cell;vertical-align:top;">
-            <div style="font-size:15px;font-weight:bold;color:{PURPLE};">{e.get('name','')}</div>
-            <div style="font-size:12px;color:{CYPRESS};margin:3px 0;font-style:italic;">
+            <div style="font-size:17px;font-weight:bold;color:{PURPLE};">{e.get('name','')}</div>
+            <div style="font-size:14px;color:{CYPRESS};margin:3px 0;font-style:italic;">
               📍 {e.get('location','')} &nbsp;·&nbsp; {e.get('dates','')}
             </div>
-            <div style="font-size:13px;color:#5a5040;margin-top:5px;line-height:1.5;">
+            <div style="font-size:15px;color:#5a5040;margin-top:5px;line-height:1.5;">
               {e.get('description','')}
             </div>
             <div style="margin-top:7px;">{url_html}</div>
@@ -993,12 +1095,12 @@ def html_louisiana_festivals(events: list) -> str:
 
 def html_el_paso_weekend(events: list) -> str:
     if not events:
-        return f'<p style="color:{MOSS};font-size:13px;font-style:italic;">No weekend listings found.</p>'
+        return f'<p style="color:{MOSS};font-size:15px;font-style:italic;">No weekend listings found.</p>'
     out = ""
     for e in events:
         url_html = ""
         if e.get("url"):
-            url_html = (f'<a href="{e["url"]}" style="font-size:12px;color:{GOLD};'
+            url_html = (f'<a href="{e["url"]}" style="font-size:14px;color:{GOLD};'
                         f'font-weight:bold;text-decoration:none;">Details →</a>')
         out += f"""
         <div style="margin-bottom:14px;padding:14px;background:{IVORY};
@@ -1008,18 +1110,18 @@ def html_el_paso_weekend(events: list) -> str:
             <div style="background:linear-gradient(135deg,{GREEN} 0%,#1A3D2E 100%);
                         border-radius:6px;padding:8px 4px;text-align:center;
                         border:1px solid {GOLD};">
-              <div style="font-size:10px;font-weight:bold;color:{GOLD_LT};
+              <div style="font-size:12px;font-weight:bold;color:{GOLD_LT};
                           text-transform:uppercase;line-height:1.4;letter-spacing:.3px;">
                 {e.get('when','')}
               </div>
             </div>
           </div>
           <div style="display:table-cell;vertical-align:top;">
-            <div style="font-size:15px;font-weight:bold;color:{PURPLE};">{e.get('name','')}</div>
-            <div style="font-size:12px;color:{CYPRESS};margin:3px 0;font-style:italic;">
+            <div style="font-size:17px;font-weight:bold;color:{PURPLE};">{e.get('name','')}</div>
+            <div style="font-size:14px;color:{CYPRESS};margin:3px 0;font-style:italic;">
               📍 {e.get('venue','')}
             </div>
-            <div style="font-size:13px;color:#5a5040;margin-top:5px;line-height:1.5;">
+            <div style="font-size:15px;color:#5a5040;margin-top:5px;line-height:1.5;">
               {e.get('description','')}
             </div>
             <div style="margin-top:7px;">{url_html}</div>
@@ -1030,25 +1132,25 @@ def html_el_paso_weekend(events: list) -> str:
 
 def html_el_paso_weekend(events: list) -> str:
     if not events:
-        return '<p style="color:#888;font-size:13px;">No weekend listings found.</p>'
+        return '<p style="color:#888;font-size:15px;">No weekend listings found.</p>'
     out = ""
     for e in events:
         url_html = ""
         if e.get("url"):
-            url_html = (f'<a href="{e["url"]}" style="font-size:12px;color:#1565C0;'
+            url_html = (f'<a href="{e["url"]}" style="font-size:14px;color:#1565C0;'
                         f'text-decoration:none;">Details →</a>')
         out += f"""
         <div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #eee;
                     display:flex;gap:14px;align-items:flex-start;">
           <div style="min-width:72px;text-align:center;background:#e3f2fd;border-radius:6px;
                       padding:6px 4px;border:1px solid #90caf9;">
-            <div style="font-size:10px;font-weight:bold;color:#1565C0;text-transform:uppercase;
+            <div style="font-size:12px;font-weight:bold;color:#1565C0;text-transform:uppercase;
                         line-height:1.3;">{e.get('when','')}</div>
           </div>
           <div style="flex:1;">
-            <div style="font-size:15px;font-weight:bold;color:#1a1a1a;">{e.get('name','')}</div>
-            <div style="font-size:12px;color:#888;margin:2px 0;">📍 {e.get('venue','')}</div>
-            <div style="font-size:13px;color:#555;margin-top:4px;line-height:1.5;">{e.get('description','')}</div>
+            <div style="font-size:17px;font-weight:bold;color:#1a1a1a;">{e.get('name','')}</div>
+            <div style="font-size:14px;color:#888;margin:2px 0;">📍 {e.get('venue','')}</div>
+            <div style="font-size:15px;color:#555;margin-top:4px;line-height:1.5;">{e.get('description','')}</div>
             <div style="margin-top:5px;">{url_html}</div>
           </div>
         </div>"""
@@ -1057,7 +1159,7 @@ def html_el_paso_weekend(events: list) -> str:
 
 def html_crs(reports: list) -> str:
     if not reports:
-        return (f'<p style="font-size:13px;color:{MOSS};font-style:italic;">No recent CRS reports retrieved. '
+        return (f'<p style="font-size:15px;color:{MOSS};font-style:italic;">No recent CRS reports retrieved. '
                 f'Browse at <a href="https://crsreports.congress.gov" style="color:{GOLD};">crsreports.congress.gov</a>.</p>')
     out = ""
     for r in reports:
@@ -1068,19 +1170,19 @@ def html_crs(reports: list) -> str:
         out += f"""
         <div style="margin-bottom:14px;padding:14px;background:{IVORY};
                     border-radius:6px;border:1px solid #E8DFC8;border-left:4px solid {PURPLE};">
-          <div style="font-size:14px;font-weight:bold;margin-bottom:4px;">
+          <div style="font-size:16px;font-weight:bold;margin-bottom:4px;">
             <a href="{url}" style="color:{PURPLE};text-decoration:none;">
               {r.get('short_title', r.get('title',''))}
             </a>
           </div>
-          <div style="font-size:12px;color:{CYPRESS};font-style:italic;margin-bottom:5px;">
+          <div style="font-size:14px;color:{CYPRESS};font-style:italic;margin-bottom:5px;">
             {r.get('title','')}
           </div>
-          <div style="font-size:11px;color:#A09070;">{meta}
+          <div style="font-size:13px;color:#A09070;">{meta}
             &nbsp;·&nbsp; <a href="{url}" style="color:{GOLD};text-decoration:none;">🔗 View report</a>
           </div>
         </div>"""
-    out += (f'<div style="text-align:right;font-size:12px;margin-top:6px;">'
+    out += (f'<div style="text-align:right;font-size:14px;margin-top:6px;">'
             f'<a href="https://crsreports.congress.gov" style="color:{GOLD};">'
             f'Browse all CRS reports ⚜</a></div>')
     return out
@@ -1090,13 +1192,13 @@ def html_ingredient(ing: dict) -> str:
     return f"""
     <div style="background:linear-gradient(135deg,{CYPRESS} 0%,#3A1800 100%);
                 border-radius:8px;padding:20px 22px;border:1px solid {GOLD};">
-      <div style="font-size:10px;color:{GOLD};text-transform:uppercase;letter-spacing:1.5px;
+      <div style="font-size:12px;color:{GOLD};text-transform:uppercase;letter-spacing:1.5px;
                   margin-bottom:8px;">⚜ &nbsp; Clebeaux's Kitchen — {ing.get('season','')}</div>
-      <div style="font-size:24px;font-weight:bold;color:{GOLD_LT};font-family:Georgia,serif;
+      <div style="font-size:26px;font-weight:bold;color:{GOLD_LT};font-family:Georgia,serif;
                   margin-bottom:12px;">
         {ing.get('ingredient','')}
       </div>
-      <div style="font-size:14px;color:#D8C0A0;line-height:1.8;font-style:italic;
+      <div style="font-size:16px;color:#D8C0A0;line-height:1.8;font-style:italic;
                   border-top:1px solid rgba(200,164,0,.3);padding-top:12px;">
         {ing.get('note','')}
       </div>
@@ -1114,7 +1216,7 @@ def build_email(d: dict) -> str:
     other_html = ""
     for city, stories in d["other_news"].items():
         other_html += f"""
-        <div style="font-size:13px;font-weight:bold;color:{PURPLE};
+        <div style="font-size:15px;font-weight:bold;color:{PURPLE};
                     margin:18px 0 8px;border-top:1px solid #E8DFC8;padding-top:14px;">
           ⚜ {city}
         </div>"""
@@ -1142,11 +1244,11 @@ def build_email(d: dict) -> str:
   <!-- ══ MASTHEAD ══ -->
   <div style="background:linear-gradient(135deg,{PURPLE} 0%,#1A0A3C 60%,{GREEN} 100%);
               padding:28px;text-align:center;position:relative;border-bottom:3px solid {GOLD};">
-    <div style="font-size:30px;font-weight:bold;color:{GOLD_LT};font-family:Georgia,serif;
+    <div style="font-size:32px;font-weight:bold;color:{GOLD_LT};font-family:Georgia,serif;
                 letter-spacing:2px;text-shadow:0 2px 8px rgba(0,0,0,.5);">
       ⚜ &nbsp; Daily Digest &nbsp; ⚜
     </div>
-    <div style="color:rgba(212,175,55,.8);font-size:13px;margin-top:6px;letter-spacing:.8px;">
+    <div style="color:rgba(212,175,55,.8);font-size:15px;margin-top:6px;letter-spacing:.8px;">
       Fort Bliss &nbsp;·&nbsp; El Paso &nbsp;·&nbsp; {today}
     </div>
     <div style="color:rgba(212,175,55,.4);font-size:18px;letter-spacing:12px;margin-top:8px;">
@@ -1230,10 +1332,10 @@ def build_email(d: dict) -> str:
   <!-- ══ FOOTER ══ -->
   <div style="background:linear-gradient(135deg,{PURPLE} 0%,#1A0A3C 60%,{GREEN} 100%);
               padding:16px;text-align:center;border-top:3px solid {GOLD};">
-    <div style="color:rgba(212,175,55,.5);font-size:16px;letter-spacing:10px;margin-bottom:8px;">
+    <div style="color:rgba(212,175,55,.5);font-size:18px;letter-spacing:10px;margin-bottom:8px;">
       ⚜ ⚜ ⚜
     </div>
-    <div style="font-size:11px;color:rgba(212,175,55,.6);letter-spacing:.8px;">
+    <div style="font-size:13px;color:rgba(212,175,55,.6);letter-spacing:.8px;">
       Daily Digest &nbsp;·&nbsp; Fort Bliss / El Paso &nbsp;·&nbsp; {today}
     </div>
   </div>
