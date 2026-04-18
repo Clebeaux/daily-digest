@@ -89,7 +89,7 @@ def _claude(prompt: str, use_search: bool = True, max_tokens: int = 1400) -> str
     """Call Claude, optionally with web search. Returns all text block content."""
     tools = [{"type": "web_search_20250305", "name": "web_search"}] if use_search else []
     payload = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-haiku-4-5-20251001",
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -109,6 +109,11 @@ def _claude(prompt: str, use_search: bool = True, max_tokens: int = 1400) -> str
                 timeout=90,
             )
             data = resp.json()
+            # Print API errors so they show up in GitHub Actions logs
+            if "error" in data:
+                print(f"    ⚠️  API error: {data['error']}")
+                time.sleep(6)
+                continue
             return "".join(
                 b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
             ).strip()
@@ -620,6 +625,38 @@ def html_snark(comment: str) -> str:
                 font-size:13px;color:{CYPRESS};line-height:1.5;">
       <span style="color:{GOLD};margin-right:6px;">⚜</span>{comment}
     </div>"""
+
+
+def html_stories(stories: list, badge_key: str = None, badge_colors: dict = None) -> str:
+    out = ""
+    for s in stories:
+        badge = ""
+        if badge_key and s.get(badge_key):
+            val = s[badge_key]
+            bg, fg = (badge_colors or {}).get(val, (CREAM, PURPLE))
+            badge = (f'<span style="background:{bg};color:{fg};border-radius:3px;'
+                     f'padding:2px 8px;font-size:11px;font-weight:bold;letter-spacing:.3px;'
+                     f'margin-right:8px;border:1px solid {GOLD_LT};">{val}</span>')
+        source = ""
+        if s.get("source"):
+            source = (f'<span style="font-size:11px;color:{GOLD};font-style:italic;'
+                      f'margin-left:8px;">— {s["source"]}</span>')
+        relevance = ""
+        if s.get("relevance"):
+            relevance = (f'<div style="font-size:12px;color:{GREEN};margin-top:5px;'
+                         f'font-style:italic;padding-left:10px;border-left:2px solid {GOLD};">'
+                         f'↳ {s["relevance"]}</div>')
+        out += f"""
+        <div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #E8DFC8;">
+          <div style="font-size:15px;font-weight:bold;color:{IRON};line-height:1.5;">
+            {badge}{s.get('headline','')}{source}
+          </div>
+          <div style="font-size:13px;color:#5a5040;margin-top:6px;line-height:1.6;">
+            {s.get('summary','')}
+          </div>
+          {relevance}
+        </div>"""
+    return out
     out = ""
     for s in stories:
         badge = ""
@@ -1211,15 +1248,16 @@ def build_email(d: dict) -> str:
 
 def send_email(html_body: str):
     today = datetime.now().strftime("%b %d, %Y")
+    recipients = [addr.strip() for addr in TO_EMAIL.split(",") if addr.strip()]
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"Daily Digest — Fort Bliss / El Paso — {today}"
     msg["From"]    = GMAIL_USER
-    msg["To"]      = TO_EMAIL
+    msg["To"]      = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_USER, GMAIL_PASS)
-        server.sendmail(GMAIL_USER, TO_EMAIL, msg.as_string())
-    print("✅ Email sent.")
+        server.sendmail(GMAIL_USER, recipients, msg.as_string())
+    print(f"✅ Email sent to {len(recipients)} recipient(s).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
