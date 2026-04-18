@@ -147,7 +147,47 @@ def _parse_json(raw: str) -> object:
 #  DATA FETCHERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── El Paso local news RSS feeds ──────────────────────────────────────────────
+EP_NEWS_RSS = [
+    ("KVIA ABC-7",   "https://kvia.com/feed/"),
+    ("KFOX14",       "https://kfoxtv.com/feed/"),
+    ("KTSM NBC-9",   "https://www.ktsm.com/feed/"),
+    ("El Paso Inc.", "https://elpasoinc.com/feed/"),
+]
+
+# ── Military tech / defense RSS feeds ─────────────────────────────────────────
+MILTECH_RSS = [
+    ("C4ISRNET",        "https://www.c4isrnet.com/arc/outboundfeeds/rss/?outputType=xml"),
+    ("Defense One",     "https://www.defenseone.com/rss/all/"),
+    ("War on the Rocks","https://warontherocks.com/feed/"),
+    ("AUSA News",       "https://www.ausa.org/news/rss.xml"),
+    ("NDIA",            "https://www.ndia.org/rss/news"),
+    ("Breaking Defense","https://breakingdefense.com/feed/"),
+]
+
+# Keywords to flag as M&S / LVC relevant for category tagging
+MS_KEYWORDS   = ["simulation","synthetic","lvc","hla","dis","tena","constructive",
+                  "digital twin","modeling","emulation","federation","jlvc","jlcctc"]
+AI_KEYWORDS   = ["artificial intelligence","machine learning","ai ","autonomous","algorithm"]
+HYPER_WORDS   = ["hypersonic","mach ","glide vehicle"]
+DE_KEYWORDS   = ["directed energy","laser","high energy","microwave"]
+CYBER_WORDS   = ["cyber","hack","electronic warfare","ew ","jamming"]
+AUTO_WORDS    = ["drone","uav","uas","unmanned","robot","autonomous system"]
+
+
+def _tag_miltech_category(headline: str, summary: str) -> str:
+    text = (headline + " " + summary).lower()
+    if any(k in text for k in MS_KEYWORDS):   return "Modeling & Simulation"
+    if any(k in text for k in AI_KEYWORDS):   return "AI/ML"
+    if any(k in text for k in AUTO_WORDS):    return "Autonomous Systems"
+    if any(k in text for k in HYPER_WORDS):   return "Hypersonics"
+    if any(k in text for k in DE_KEYWORDS):   return "Directed Energy"
+    if any(k in text for k in CYBER_WORDS):   return "Cybersecurity"
+    return "Defense Tech"
+
+
 def get_news(topic: str, count: int) -> list:
+    """Generic Claude-search news fetch — used for regional/other topics."""
     text = _claude(
         f"Search for the {count} most recent local news stories about {topic} "
         f"from today or the last 48 hours. "
@@ -158,6 +198,85 @@ def get_news(topic: str, count: int) -> list:
     return r if isinstance(r, list) and r else [
         {"headline": f"News unavailable — {topic}", "summary": "Could not retrieve at this time."}
     ]
+
+
+def get_ep_news() -> list:
+    """
+    El Paso local news via RSS from KVIA, KFOX14, KTSM, El Paso Inc.
+    Falls back to Claude search if all feeds fail.
+    """
+    all_items = []
+    for source, feed_url in EP_NEWS_RSS:
+        items = _fetch_rss(feed_url, max_items=4)
+        for item in items:
+            item["source"] = source
+        all_items.extend(items)
+
+    # Deduplicate by headline similarity (simple: exact match on first 40 chars)
+    seen = set()
+    unique = []
+    for item in all_items:
+        key = item.get("headline", "")[:40].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    if unique:
+        return unique[:5]
+
+    # Fallback
+    print("    ⚠️  EP RSS feeds empty, falling back to Claude search")
+    return get_news("El Paso Texas Fort Bliss local news", 4)
+
+
+def get_military_tech_links() -> list:
+    """
+    Military technology news via RSS from C4ISRNET, Defense One,
+    War on the Rocks, AUSA, NDIA, Breaking Defense.
+    Auto-tags each story with an M&S/tech category.
+    Falls back to Claude search if feeds are empty.
+    """
+    all_items = []
+    for source, feed_url in MILTECH_RSS:
+        items = _fetch_rss(feed_url, max_items=5)
+        for item in items:
+            item["source"]   = source
+            item["category"] = _tag_miltech_category(
+                item.get("headline", ""), item.get("summary", "")
+            )
+        all_items.extend(items)
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for item in all_items:
+        key = item.get("headline", "")[:40].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    if unique:
+        # Prioritize M&S stories first, then others
+        ms_first = sorted(
+            unique,
+            key=lambda x: 0 if x.get("category") in
+                ("Modeling & Simulation", "LVC/Training", "AI/ML") else 1
+        )
+        return ms_first[:6]
+
+    # Fallback to Claude
+    print("    ⚠️  Miltech RSS feeds empty, falling back to Claude search")
+    text = _claude(
+        "Search for 4-5 recent military technology news articles (last 7 days). "
+        "Prioritize M&S, LVC, synthetic training, AI in defense, autonomous systems, hypersonics. "
+        "Return ONLY a JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
+        "'url' (real https URL), 'category'. No markdown. Pure JSON."
+    )
+    r = _parse_json(text)
+    if not isinstance(r, list):
+        return []
+    return [s for s in r if isinstance(s.get("url",""), str)
+            and s["url"].startswith("http") and len(s["url"]) > 20] or r
 
 
 def get_movies_el_paso() -> list:
@@ -531,25 +650,6 @@ def get_world_news() -> list:
     return r if isinstance(r, list) and r else [
         {"headline": "World news unavailable", "summary": "", "region": ""}
     ]
-
-
-def get_military_tech_links() -> list:
-    text = _claude(
-        f"Search for 4-5 recent news articles (last 7 days) on new military technology. "
-        f"Prioritize: modeling and simulation (M&S), synthetic training environments, digital twins, "
-        f"Live Virtual Constructive (LVC), HLA/DIS/TENA interoperability, AI in defense, "
-        f"autonomous systems, hypersonics, directed energy, DoD simulation acquisition. "
-        f"Return ONLY a valid JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
-        f"'url' (real full https URL — required, no made-up URLs), "
-        f"'category' (e.g. 'Modeling & Simulation', 'Autonomous Systems', 'Hypersonics', "
-        f"'AI/ML', 'Directed Energy', 'LVC/Training'). "
-        f"Only include entries with a real, verifiable URL. No markdown, no preamble. Pure JSON."
-    )
-    r = _parse_json(text)
-    if not isinstance(r, list):
-        return []
-    return [s for s in r if isinstance(s.get("url", ""), str)
-            and s["url"].startswith("http") and len(s["url"]) > 20] or r
 
 
 def get_ingredient_of_the_day() -> dict:
@@ -1371,7 +1471,7 @@ def main():
         ("📈 Markets",               "markets",     get_markets),
         ("🎉 Louisiana festivals",   "la_festivals", get_louisiana_festivals),
         ("🌵 EP weekend events",     "ep_weekend",   get_el_paso_weekend),
-        ("📍 El Paso news",          "ep_news",      lambda: get_news("El Paso Texas Fort Bliss local news", 4)),
+        ("📍 El Paso news",          "ep_news",      get_ep_news),
         ("🎬 Movies",                "movies",      get_movies_el_paso),
         ("🐯 LSU sports",            "lsu",         get_lsu_sports),
         ("🌿 Louisiana news",        "louisiana",   get_louisiana_news),
