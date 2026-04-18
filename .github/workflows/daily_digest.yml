@@ -1,0 +1,37 @@
+name: Daily Digest Email
+
+# Fires every morning at 7:00 AM Central Time (13:00 UTC)
+# Common alternatives:
+#   6am CT  = '0 12 * * *'
+#   7am CT  = '0 13 * * *'   ← default
+#   8am CT  = '0 14 * * *'
+
+on:
+  schedule:
+    - cron: '0 13 * * *'
+  workflow_dispatch:       # lets you trigger a test run from the Actions tab
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20    # v3 makes ~15 API calls, allow enough time
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Daily Digest v3
+        env:
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_USER:          ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
+          TO_EMAIL:            ${{ secrets.TO_EMAIL }}
+        run: python daily_digest_v3.py
