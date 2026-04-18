@@ -863,6 +863,175 @@ def get_ingredient_of_the_day() -> dict:
     }
 
 
+def get_louisiana_seafood() -> dict:
+    """
+    Louisiana seafood market report — crawfish, shrimp, oysters, crab.
+    Uses Claude search targeting LDWF, Louisiana Seafood Board, and market sources.
+    Returns {crawfish, shrimp, oysters, crab, note}
+    """
+    today_str = date.today().strftime("%B %d, %Y")
+    text = _claude(
+        f"Today is {today_str}. Search for current Louisiana seafood availability and market "
+        f"conditions. Check Louisiana Seafood Board (louisianaseafood.com), Louisiana Department "
+        f"of Wildlife and Fisheries (wlf.louisiana.gov), and Gulf seafood market reports. "
+        f"Find current status and approximate price ranges for: crawfish, Gulf shrimp, "
+        f"Louisiana oysters, and blue crab. Note if anything is in peak season, scarce, "
+        f"or has had recent price changes. "
+        f"Return ONLY a valid JSON object with five string fields: "
+        f"'crawfish' (availability and price note, 1-2 sentences), "
+        f"'shrimp' (availability and price note, 1-2 sentences), "
+        f"'oysters' (availability and price note, 1-2 sentences), "
+        f"'crab' (availability and price note, 1-2 sentences), "
+        f"'note' (one sentence — overall market mood or seasonal highlight). "
+        f"No markdown, no preamble. Pure JSON.",
+        max_tokens=600,
+    )
+    r = _parse_json(text)
+    return r if isinstance(r, dict) and r.get("crawfish") else {
+        "crawfish": "Market data unavailable.",
+        "shrimp":   "Market data unavailable.",
+        "oysters":  "Market data unavailable.",
+        "crab":     "Market data unavailable.",
+        "note":     "Could not retrieve Louisiana seafood market report today.",
+    }
+
+
+def get_saints_scores() -> dict:
+    """
+    New Orleans Saints scores and news. Also Pelicans if NBA season is active.
+    Returns {saints_record, saints_recent:[{opponent,result,date}],
+             pelicans_recent:[{opponent,result,date}], stories:[{headline,summary}]}
+    """
+    today_str = date.today().strftime("%B %d, %Y")
+    text = _claude(
+        f"Today is {today_str}. Search for the latest New Orleans Saints NFL news and scores. "
+        f"Also check if the New Orleans Pelicans NBA season is currently active and if so "
+        f"get their recent scores. "
+        f"Return ONLY a valid JSON object with four keys: "
+        f"'saints_record' (string, e.g. '8-9' or 'Offseason'), "
+        f"'saints_recent' (array of up to 3 objects: opponent, result like 'W 27-10' or 'L 14-21', date), "
+        f"'pelicans_recent' (array of up to 3 objects: opponent, result, date — empty array if offseason), "
+        f"'stories' (array of 2-3 objects: headline, summary — 1 sentence each — "
+        f"covering Saints/Pelicans news, trades, injuries, draft). "
+        f"No markdown, no preamble. Pure JSON.",
+        max_tokens=700,
+    )
+    r = _parse_json(text)
+    return r if isinstance(r, dict) else {
+        "saints_record": "—",
+        "saints_recent": [],
+        "pelicans_recent": [],
+        "stories": [{"headline": "Saints/Pelicans data unavailable", "summary": ""}],
+    }
+
+
+# TRADOC and exercise-relevant RSS feeds
+TRADOC_RSS = [
+    ("TRADOC News",    "https://www.army.mil/rss/tradoc/"),
+    ("Army.mil News",  "https://www.army.mil/rss/"),
+    ("ARNEWS",         "https://www.army.mil/rss/arnews/"),
+]
+
+EXERCISE_KEYWORDS = [
+    "exercise","rotation","jrtc","ntc","joint readiness","national training",
+    "fort bliss","fort irwin","fort johnson","bliss","irwin","johnson",
+    "combined arms","warfighter","calfex","live fire","brigade combat",
+    "division","corps","tradoc","forscom","rotational unit","training event",
+    "swift response","defender","iron union","austere challenge","ulchi",
+]
+
+TRADOC_KEYWORDS = [
+    "tradoc","doctrine","atp ","adp ","fm ","field manual","training circular",
+    "tc ","adrp","artep","opord","conops","synthetic training","virtual training",
+    "lvc","miles","instrumentation","sim","simulation","synthetic","constructive",
+    "readiness","training strategy","force design","force 2025","army futures",
+]
+
+
+def get_exercise_schedule() -> list:
+    """
+    Fort Bliss / JRTC / NTC exercise and rotation schedule news.
+    RSS-first, Claude search fallback.
+    """
+    all_items = []
+    for source, feed_url in TRADOC_RSS:
+        items = _fetch_rss(feed_url, max_items=10)
+        for item in items:
+            item["source"] = source
+        all_items.extend(items)
+
+    # Filter for exercise-relevant content
+    relevant = [
+        i for i in all_items
+        if any(kw in (i.get("headline","") + i.get("summary","")).lower()
+               for kw in EXERCISE_KEYWORDS)
+    ][:4]
+
+    if relevant:
+        return relevant
+
+    # Fallback to Claude search
+    print("    ⚠️  Exercise RSS empty, falling back to Claude")
+    text = _claude(
+        f"Search for recent news about upcoming or ongoing Army training exercises and rotations "
+        f"at Fort Bliss TX, JRTC Fort Johnson LA, NTC Fort Irwin CA, or other major combat training "
+        f"centers. Include exercise names, rotating units, and dates if available. Also search for "
+        f"any announced WARFIGHTER exercises, joint exercises, or multinational training events "
+        f"involving U.S. Army units. "
+        f"Return ONLY a JSON array of 3-5 items. Each element: "
+        f"'headline', 'summary' (1-2 sentences), 'source' (publication). "
+        f"No markdown. Pure JSON.",
+        max_tokens=700,
+    )
+    r = _parse_json(text)
+    return r if isinstance(r, list) and r else [
+        {"headline": "Exercise schedule data unavailable",
+         "summary": "Check FORSCOM and installation PAO for current rotation schedules.",
+         "source": ""}
+    ]
+
+
+def get_tradoc_news() -> list:
+    """
+    TRADOC doctrine, training strategy, and Army training news.
+    RSS-first with keyword filtering, Claude fallback.
+    """
+    all_items = []
+    for source, feed_url in TRADOC_RSS:
+        items = _fetch_rss(feed_url, max_items=10)
+        for item in items:
+            item["source"] = source
+        all_items.extend(items)
+
+    # Filter for TRADOC/doctrine/training relevance
+    relevant = [
+        i for i in all_items
+        if any(kw in (i.get("headline","") + i.get("summary","")).lower()
+               for kw in TRADOC_KEYWORDS)
+    ][:4]
+
+    if relevant:
+        return relevant
+
+    # Fallback
+    print("    ⚠️  TRADOC RSS empty, falling back to Claude")
+    text = _claude(
+        f"Search for recent TRADOC news, Army doctrine updates, new field manuals or training "
+        f"circulars, synthetic training environment announcements, LVC program updates, "
+        f"or Army Force Design initiatives from the last 14 days. "
+        f"Return ONLY a JSON array of 3-4 items. Each element: "
+        f"'headline', 'summary' (1-2 sentences), 'source'. "
+        f"No markdown. Pure JSON.",
+        max_tokens=700,
+    )
+    r = _parse_json(text)
+    return r if isinstance(r, list) and r else [
+        {"headline": "TRADOC news unavailable",
+         "summary": "Check tradoc.army.mil for current doctrine and training updates.",
+         "source": ""}
+    ]
+
+
 def get_snarky_comments(d: dict) -> dict:
     """
     Read the day's actual content and generate section-specific snarky commentary.
@@ -904,15 +1073,22 @@ def get_snarky_comments(d: dict) -> dict:
     ingredient = d.get("ingredient", {})
     on_this_day = d.get("on_this_day", {})
 
+    seafood   = d.get("seafood", {})
+    saints    = d.get("saints", {})
+
     content_summary = f"""
 MARKETS: DJI {price_dji:,.0f} ({pct_dji:+.1f}%), S&P {price_sp:,.0f} ({pct_sp:+.1f}%), WTI crude ${price_wti:.2f} ({pct_wti:+.1f}%)
 EL PASO NEWS: {headlines(d.get('ep_news', []))}
 EL PASO WEATHER (today): {weather_summary}
 LSU SPORTS: {lsu_scores(d.get('lsu', {}))}
+SAINTS RECORD: {saints.get('saints_record','—')} | Recent: {", ".join(f"{s.get('opponent','')} {s.get('result','')}" for s in saints.get('saints_recent',[])[:2]) or 'none'}
+LOUISIANA SEAFOOD: Crawfish — {seafood.get('crawfish','')[:60]} | Shrimp — {seafood.get('shrimp','')[:60]}
 LOUISIANA NEWS: {headlines(d.get('louisiana', []))}
 LOUISIANA FESTIVALS (next 30 days): {festival_names(d.get('la_festivals', []))}
 EL PASO WEEKEND EVENTS: {weekend_events(d.get('ep_weekend', []))}
 DOD/ARMY NEWS: {headlines(d.get('dod_news', []))}
+TRADOC NEWS: {headlines(d.get('tradoc_news', []))}
+EXERCISE SCHEDULE: {headlines(d.get('exercise_schedule', []))}
 DEFENSE BUDGET NEWS: {headlines(d.get('budget_news', []))}
 WORLD NEWS: {headlines(d.get('world_news', []))}
 MILITARY TECH: {headlines(d.get('miltech', []))}
@@ -937,12 +1113,17 @@ Rules:
 - Reference the actual headlines/scores/data where possible — not generic.
 - Don't be cruel about real people. Punch at institutions, situations, and irony.
 - LSU commentary should reflect the actual W/L record shown.
+- Saints commentary should reflect actual record and season status.
+- Seafood comments should react to actual prices/availability — crawfish season is sacred.
 - Weather comments should react to the actual El Paso forecast.
 - Markets comments can react to actual direction (up/down/flat).
+- Exercise schedule comments can reference the absurdity or significance of Army bureaucracy.
+- TRADOC comments can gently mock doctrine-speak while respecting the mission.
 - Occasionally make a Divorce Era cookbook joke if something fits.
 - Return ONLY a valid JSON object with exactly these keys:
-  markets, ep_news, weather, lsu, louisiana, la_festivals, ep_weekend, 
-  dod_news, budget_news, world_news, miltech, word_of_day, on_this_day, ingredient
+  markets, ep_news, weather, lsu, saints, seafood, louisiana, la_festivals, ep_weekend,
+  ep_restaurants, dod_news, tradoc_news, exercise_schedule, budget_news, world_news,
+  miltech, word_of_day, on_this_day, ingredient
 Each value is a single string (the comment). No markdown, no preamble. Pure JSON.
 
 TODAY'S CONTENT:
@@ -1459,6 +1640,140 @@ def html_ep_restaurants(items: list) -> str:
     return out
 
 
+def html_seafood(s: dict) -> str:
+    items = [
+        ("🦞", "Crawfish",  s.get("crawfish", "—")),
+        ("🦐", "Shrimp",    s.get("shrimp",   "—")),
+        ("🦪", "Oysters",   s.get("oysters",  "—")),
+        ("🦀", "Blue Crab", s.get("crab",     "—")),
+    ]
+    rows = ""
+    for emoji, label, note in items:
+        rows += f"""
+        <tr style="border-bottom:1px solid #E8DFC8;">
+          <td style="padding:10px 12px;width:110px;vertical-align:top;">
+            <span style="font-size:20px;">{emoji}</span>
+            <span style="font-size:14px;font-weight:bold;color:{PURPLE};
+                         margin-left:6px;">{label}</span>
+          </td>
+          <td style="padding:10px 12px;font-size:15px;color:#5a5040;
+                     line-height:1.5;vertical-align:top;">{note}</td>
+        </tr>"""
+    note_bar = ""
+    if s.get("note"):
+        note_bar = f"""
+        <div style="background:linear-gradient(90deg,{GREEN},#1A3D2E);
+                    padding:10px 14px;margin-top:2px;border-radius:0 0 6px 6px;">
+          <span style="font-size:14px;font-style:italic;color:{GOLD_LT};">
+            ⚜ {s['note']}
+          </span>
+        </div>"""
+    return f"""
+    <div style="border:1px solid {GOLD};border-radius:8px;overflow:hidden;margin-bottom:8px;">
+      <div style="background:linear-gradient(135deg,{GREEN} 0%,#1A3D2E 100%);
+                  padding:8px 14px;">
+        <span style="font-size:13px;font-weight:bold;color:{GOLD_LT};
+                     text-transform:uppercase;letter-spacing:.8px;">
+          ⚜ Louisiana Gulf Seafood Market Report
+        </span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;background:{IVORY};">
+        {rows}
+      </table>
+      {note_bar}
+    </div>"""
+
+
+def html_saints(data: dict) -> str:
+    record = data.get("saints_record", "—")
+    saints_games  = data.get("saints_recent", [])
+    pelicans_games = data.get("pelicans_recent", [])
+    stories = data.get("stories", [])
+
+    def game_rows(games, team_color):
+        out = ""
+        for g in games:
+            w   = str(g.get("result","")).upper().startswith("W")
+            bg  = "#E0F2E9" if w else "#FFE8E0"
+            clr = "#1A6B35" if w else "#8B1A00"
+            out += f"""
+            <tr style="border-bottom:1px solid #E8DFC8;">
+              <td style="padding:8px 12px;font-size:15px;color:{IRON};">
+                vs {g.get('opponent','')}
+              </td>
+              <td style="padding:8px 12px;font-size:13px;color:{CYPRESS};font-style:italic;">
+                {g.get('date','')}
+              </td>
+              <td style="padding:8px 12px;text-align:center;">
+                <span style="background:{bg};color:{clr};font-weight:bold;
+                             padding:3px 12px;border-radius:12px;font-size:14px;">
+                  {g.get('result','')}
+                </span>
+              </td>
+            </tr>"""
+        return out
+
+    saints_html = ""
+    if saints_games:
+        saints_html = f"""
+        <div style="font-size:13px;font-weight:bold;color:{PURPLE};margin:12px 0 6px;
+                    text-transform:uppercase;letter-spacing:.5px;">
+          ⚜ Saints &nbsp;·&nbsp;
+          <span style="background:{PURPLE};color:{GOLD_LT};padding:2px 10px;
+                       border-radius:12px;font-size:12px;">{record}</span>
+        </div>
+        <table style="width:100%;border-collapse:collapse;background:{IVORY};
+                      border-radius:6px;border:1px solid #E8DFC8;margin-bottom:12px;">
+          {game_rows(saints_games, PURPLE)}
+        </table>"""
+
+    pelicans_html = ""
+    if pelicans_games:
+        pelicans_html = f"""
+        <div style="font-size:13px;font-weight:bold;color:{GREEN};margin:12px 0 6px;
+                    text-transform:uppercase;letter-spacing:.5px;">⚜ Pelicans</div>
+        <table style="width:100%;border-collapse:collapse;background:{IVORY};
+                      border-radius:6px;border:1px solid #E8DFC8;margin-bottom:12px;">
+          {game_rows(pelicans_games, GREEN)}
+        </table>"""
+
+    return saints_html + pelicans_html + html_stories(stories)
+
+
+def html_exercise_schedule(items: list) -> str:
+    if not items:
+        return (f'<p style="color:{MOSS};font-size:15px;font-style:italic;">'
+                f'No exercise schedule data found. Check '
+                f'<a href="https://www.army.mil/forscom" style="color:{GOLD};">FORSCOM</a> '
+                f'for current rotations.</p>')
+    out = ""
+    for item in items:
+        source = item.get("source","")
+        src_badge = (f'<span style="font-size:13px;color:{GOLD};font-style:italic;">'
+                     f'— {source}</span>' if source else "")
+        out += f"""
+        <div style="margin-bottom:14px;padding:14px;background:{IVORY};
+                    border-radius:6px;border:1px solid #E8DFC8;
+                    border-left:4px solid {PURPLE};">
+          <div style="font-size:17px;font-weight:bold;color:{PURPLE};
+                      line-height:1.4;margin-bottom:5px;">
+            {item.get('headline','')} {src_badge}
+          </div>
+          <div style="font-size:15px;color:#5a5040;line-height:1.6;">
+            {item.get('summary','')}
+          </div>
+        </div>"""
+    return out
+
+
+def html_tradoc_news(items: list) -> str:
+    if not items:
+        return (f'<p style="color:{MOSS};font-size:15px;font-style:italic;">'
+                f'No TRADOC updates found. Check '
+                f'<a href="https://www.tradoc.army.mil" style="color:{GOLD};">tradoc.army.mil</a>.</p>')
+    return html_stories(items)
+
+
 def html_crs(reports: list) -> str:
     if not reports:
         return (f'<p style="font-size:15px;color:{MOSS};font-style:italic;">No recent CRS reports retrieved. '
@@ -1592,9 +1907,17 @@ def build_email(d: dict) -> str:
     {html_snark(s.get("lsu",""))}
     {html_lsu(d["lsu"])}
 
+    {h2("⚜", "New Orleans Saints & Pelicans")}
+    {html_snark(s.get("saints",""))}
+    {html_saints(d["saints"])}
+
     {h2("🌿", "Louisiana — NOLA · Baton Rouge · Northshore")}
     {html_snark(s.get("louisiana",""))}
     {html_stories(d["louisiana"], badge_key="area", badge_colors=AREA_COLORS)}
+
+    {h2("🦞", "Louisiana Seafood Market Report")}
+    {html_snark(s.get("seafood",""))}
+    {html_seafood(d["seafood"])}
 
     {h2("📚", "From the Great Books of the Western World")}
     {html_quotes(d["quotes"])}
@@ -1610,6 +1933,14 @@ def build_email(d: dict) -> str:
     {h2("🪖", "DoD / Army News")}
     {html_snark(s.get("dod_news",""))}
     {html_stories(d["dod_news"])}
+
+    {h2("🎯", "TRADOC — Doctrine & Training News")}
+    {html_snark(s.get("tradoc_news",""))}
+    {html_tradoc_news(d["tradoc_news"])}
+
+    {h2("📅", "Exercise & Rotation Schedule")}
+    {html_snark(s.get("exercise_schedule",""))}
+    {html_exercise_schedule(d["exercise_schedule"])}
 
     {h2("💰", "Defense Budget & Congressional Tracker")}
     {html_snark(s.get("budget_news",""))}
@@ -1675,7 +2006,10 @@ def send_email(html_body: str):
 def main():
     steps = [
         ("📈 Markets",               "markets",     get_markets),
-        ("🎉 Louisiana festivals",   "la_festivals", get_louisiana_festivals),
+        ("⚜  Saints/Pelicans",       "saints",          get_saints_scores),
+        ("🦞 LA seafood report",     "seafood",         get_louisiana_seafood),
+        ("🎯 TRADOC news",           "tradoc_news",     get_tradoc_news),
+        ("📅 Exercise schedule",     "exercise_schedule", get_exercise_schedule),
         ("🌵 EP weekend events",     "ep_weekend",   get_el_paso_weekend),
         ("🍽️  EP restaurants",       "ep_restaurants", get_ep_restaurants),
         ("📍 El Paso news",          "ep_news",      get_ep_news),
