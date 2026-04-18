@@ -1964,6 +1964,13 @@ def build_email(d: dict) -> str:
     <div style="color:rgba(212,175,55,.5);font-size:18px;letter-spacing:10px;margin-bottom:8px;">
       ⚜ ⚜ ⚜
     </div>
+    <div style="margin-bottom:10px;">
+      <a href="https://translate.google.com/?sl=fr&tl=en&text=Marche%20dans%20mes%20souliers%20et%20fais-toi%20un%20nom%20!" 
+         style="font-size:16px;font-weight:bold;color:{GOLD_LT};text-decoration:none;
+                font-family:Georgia,serif;font-style:italic;letter-spacing:.5px;">
+        Marche dans mes souliers et fais-toi un nom&nbsp;!
+      </a>
+    </div>
     <div style="font-size:13px;color:rgba(212,175,55,.6);letter-spacing:.8px;">
       Daily Digest &nbsp;·&nbsp; Fort Bliss / El Paso &nbsp;·&nbsp; {today}
     </div>
