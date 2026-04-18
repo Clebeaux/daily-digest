@@ -8,13 +8,15 @@ name: Daily Digest Email
 
 on:
   schedule:
-    - cron: '0 11 * * *'
+    - cron: '0 13 * * *'
   workflow_dispatch:       # lets you trigger a test run from the Actions tab
 
 jobs:
   send-digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 20    # v3 makes ~15 API calls, allow enough time
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Check out repository
