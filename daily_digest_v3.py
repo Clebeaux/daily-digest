@@ -197,12 +197,13 @@ def get_news(topic: str, count: int) -> list:
     text = _claude(
         f"Search for the {count} most recent local news stories about {topic} "
         f"from today or the last 48 hours. "
-        f"Return ONLY a valid JSON array. Each element: 'headline' and 'summary' (1-2 sentences). "
+        f"Return ONLY a valid JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
+        f"'url' (direct link to the article — must be a real https URL, empty string if unavailable). "
         f"No markdown, no preamble. Pure JSON."
     )
     r = _parse_json(text)
     return r if isinstance(r, list) and r else [
-        {"headline": f"News unavailable — {topic}", "summary": "Could not retrieve at this time."}
+        {"headline": f"News unavailable — {topic}", "summary": "Could not retrieve at this time.", "url": ""}
     ]
 
 
@@ -359,12 +360,13 @@ def get_lsu_sports() -> dict:
         f"track, gymnastics, swimming, or any currently in season. "
         f"Return ONLY a valid JSON object with two keys: "
         f"'scores' (array: sport, opponent, result like 'W 8-3' or 'L 72-75', date) "
-        f"and 'stories' (array of 2-3 objects: headline, summary — 1-2 sentences each). "
+        f"and 'stories' (array of 2-3 objects: headline, summary 1-2 sentences, "
+        f"url — real article link or empty string). "
         f"No markdown, no preamble. Pure JSON."
     )
     r = _parse_json(text)
     return r if isinstance(r, dict) else {
-        "scores": [], "stories": [{"headline": "LSU sports data unavailable", "summary": ""}]
+        "scores": [], "stories": [{"headline": "LSU sports data unavailable", "summary": "", "url": ""}]
     }
 
 
@@ -420,11 +422,12 @@ def get_louisiana_news() -> list:
     text = _claude(
         "Search for 4 recent Louisiana news stories — New Orleans, Baton Rouge, Northshore. "
         "Return ONLY a JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
-        "'area' (New Orleans/Baton Rouge/Northshore/Statewide). No markdown. Pure JSON."
+        "'area' (New Orleans/Baton Rouge/Northshore/Statewide), "
+        "'url' (direct article link or empty string). No markdown. Pure JSON."
     )
     r = _parse_json(text)
     return r if isinstance(r, list) and r else [
-        {"headline": "Louisiana news unavailable", "summary": "", "area": ""}
+        {"headline": "Louisiana news unavailable", "summary": "", "area": "", "url": ""}
     ]
 
 
@@ -709,16 +712,16 @@ def get_defense_budget_news() -> list:
     ][:3]
 
     if not relevant:
-        # Fallback to Claude
         text = _claude(
             "Search for 2-3 recent stories about US defense budget, NDAA, or M&S/simulation "
             "program funding from the last 7 days. "
             "Return ONLY a JSON array. Each element: 'headline', 'summary' (1-2 sentences), "
-            "'relevance' (why it matters to M&S). No markdown. Pure JSON."
+            "'relevance' (why it matters to M&S), 'url' (article link or empty string). "
+            "No markdown. Pure JSON."
         )
         r = _parse_json(text)
         return r if isinstance(r, list) and r else [
-            {"headline": "Defense budget news unavailable", "summary": "", "relevance": ""}
+            {"headline": "Defense budget news unavailable", "summary": "", "relevance": "", "url": ""}
         ]
 
     # Add relevance tag via Claude
@@ -917,7 +920,8 @@ def get_saints_scores() -> dict:
         f"'saints_record' (string, e.g. '8-9' or 'Offseason'), "
         f"'saints_recent' (array of up to 3 objects: opponent, result like 'W 27-10' or 'L 14-21', date), "
         f"'pelicans_recent' (array of up to 3 objects: opponent, result, date — empty array if offseason), "
-        f"'stories' (array of 2-3 objects: headline, summary — 1 sentence each — "
+        f"'stories' (array of 2-3 objects: headline, summary — 1 sentence each, "
+        f"url — real article link or empty string — "
         f"covering Saints/Pelicans news, trades, injuries, draft). "
         f"No markdown, no preamble. Pure JSON.",
         max_tokens=700,
@@ -927,7 +931,7 @@ def get_saints_scores() -> dict:
         "saints_record": "—",
         "saints_recent": [],
         "pelicans_recent": [],
-        "stories": [{"headline": "Saints/Pelicans data unavailable", "summary": ""}],
+        "stories": [{"headline": "Saints/Pelicans data unavailable", "summary": "", "url": ""}],
     }
 
 
@@ -985,7 +989,7 @@ def get_exercise_schedule() -> list:
         f"any announced WARFIGHTER exercises, joint exercises, or multinational training events "
         f"involving U.S. Army units. "
         f"Return ONLY a JSON array of 3-5 items. Each element: "
-        f"'headline', 'summary' (1-2 sentences), 'source' (publication). "
+        f"'headline', 'summary' (1-2 sentences), 'source', 'url' (article link or empty string). "
         f"No markdown. Pure JSON.",
         max_tokens=700,
     )
@@ -993,7 +997,7 @@ def get_exercise_schedule() -> list:
     return r if isinstance(r, list) and r else [
         {"headline": "Exercise schedule data unavailable",
          "summary": "Check FORSCOM and installation PAO for current rotation schedules.",
-         "source": ""}
+         "source": "", "url": ""}
     ]
 
 
@@ -1009,7 +1013,6 @@ def get_tradoc_news() -> list:
             item["source"] = source
         all_items.extend(items)
 
-    # Filter for TRADOC/doctrine/training relevance
     relevant = [
         i for i in all_items
         if any(kw in (i.get("headline","") + i.get("summary","")).lower()
@@ -1019,14 +1022,13 @@ def get_tradoc_news() -> list:
     if relevant:
         return relevant
 
-    # Fallback
     print("    ⚠️  TRADOC RSS empty, falling back to Claude")
     text = _claude(
         f"Search for recent TRADOC news, Army doctrine updates, new field manuals or training "
         f"circulars, synthetic training environment announcements, LVC program updates, "
         f"or Army Force Design initiatives from the last 14 days. "
         f"Return ONLY a JSON array of 3-4 items. Each element: "
-        f"'headline', 'summary' (1-2 sentences), 'source'. "
+        f"'headline', 'summary' (1-2 sentences), 'source', 'url' (article link or empty string). "
         f"No markdown. Pure JSON.",
         max_tokens=700,
     )
@@ -1218,45 +1220,29 @@ def html_stories(stories: list, badge_key: str = None, badge_colors: dict = None
             relevance = (f'<div style="font-size:14px;color:{GREEN};margin-top:5px;'
                          f'font-style:italic;padding-left:10px;border-left:2px solid {GOLD};">'
                          f'↳ {s["relevance"]}</div>')
+        # Headline — clickable if URL present
+        url = s.get("url", "").strip()
+        headline_text = s.get("headline", "")
+        if url and url.startswith("http"):
+            headline_html = (f'<a href="{url}" style="color:{PURPLE};text-decoration:none;'
+                             f'border-bottom:1px dotted {GOLD};">{headline_text}</a>')
+            read_more = (f'<div style="margin-top:6px;">'
+                         f'<a href="{url}" style="font-size:13px;color:{GOLD};'
+                         f'font-weight:bold;text-decoration:none;">Read more ⚜</a></div>')
+        else:
+            headline_html = headline_text
+            read_more = ""
+
         out += f"""
         <div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #E8DFC8;">
           <div style="font-size:17px;font-weight:bold;color:{IRON};line-height:1.5;">
-            {badge}{s.get('headline','')}{source}
+            {badge}{headline_html}{source}
           </div>
           <div style="font-size:15px;color:#5a5040;margin-top:6px;line-height:1.6;">
             {s.get('summary','')}
           </div>
           {relevance}
-        </div>"""
-    return out
-    out = ""
-    for s in stories:
-        badge = ""
-        if badge_key and s.get(badge_key):
-            val = s[badge_key]
-            bg, fg = (badge_colors or {}).get(val, (CREAM, PURPLE))
-            badge = (f'<span style="background:{bg};color:{fg};border-radius:3px;'
-                     f'padding:2px 8px;font-size:13px;font-weight:bold;letter-spacing:.3px;'
-                     f'margin-right:8px;border:1px solid {GOLD_LT};">{val}</span>')
-        source = ""
-        if s.get("source"):
-            source = (f'<span style="font-size:13px;color:{GOLD};font-style:italic;'
-                      f'margin-left:8px;">— {s["source"]}</span>')
-        relevance = ""
-        if s.get("relevance"):
-            relevance = (f'<div style="font-size:14px;color:{GREEN};margin-top:5px;'
-                         f'font-style:italic;padding-left:10px;border-left:2px solid {GOLD};">'
-                         f'↳ {s["relevance"]}</div>')
-        out += f"""
-        <div style="margin-bottom:16px;padding-bottom:16px;
-                    border-bottom:1px solid #E8DFC8;">
-          <div style="font-size:17px;font-weight:bold;color:{IRON};line-height:1.5;">
-            {badge}{s.get('headline','')}{source}
-          </div>
-          <div style="font-size:15px;color:#5a5040;margin-top:6px;line-height:1.6;">
-            {s.get('summary','')}
-          </div>
-          {relevance}
+          {read_more}
         </div>"""
     return out
 
