@@ -8,7 +8,7 @@ name: Daily Digest Email
 
 on:
   schedule:
-    - cron: '0 13 * * *'
+    - cron: '0 11 * * *'
   workflow_dispatch:       # lets you trigger a test run from the Actions tab
 
 jobs:
